@@ -925,6 +925,17 @@ function resetSimulation(performInitialRoll = false) {
   simulator = new Simulator(uploadedDecks.A, uploadedDecks.B, appendLog, startingPlayerIndex);
   simulator.setSpeed(simSpeed);
 
+  // Debug: log initial simulator state for troubleshooting deck-specific behavior
+  try {
+    simulator.players.forEach((p) => {
+      const typeCounts = p.library.reduce((acc, c) => { acc[c.type] = (acc[c.type] || 0) + 1; return acc; }, {});
+      console.debug(`Player ${p.id} '${p.name}' — library: ${p.library.length} cards, hand: ${p.hand.length}, battlefield: ${p.battlefield.length}, types: ${JSON.stringify(typeCounts)}`);
+      console.debug(`Player ${p.id} hand sample: ${p.hand.slice(0,8).map((c) => `${c.name}(${c.type})`).join(', ')}`);
+    });
+  } catch (e) {
+    console.warn('Could not print simulator debug info', e);
+  }
+
   if (performInitialRoll) {
     d20Rolls.A = rollD20();
     d20Rolls.B = rollD20();
@@ -991,6 +1002,17 @@ async function handleDeckUpload(slot, file) {
     const parsedDeck = parseDeckListText(text, fileBaseName || "Uploaded Deck");
     const simDeck = await buildSimulationDeck(parsedDeck);
     uploadedDecks[slot] = simDeck;
+
+    // Debug: log a short summary of the uploaded deck to help diagnose deck-specific issues
+    try {
+      const counts = simDeck.cards.reduce((acc, c) => {
+        acc[c.type] = (acc[c.type] || 0) + (c.count || 0);
+        return acc;
+      }, {});
+      console.debug(`Deck ${slot} loaded: ${simDeck.name} — totals: ${JSON.stringify(counts)}`);
+    } catch (e) {
+      console.debug(`Deck ${slot} loaded: ${simDeck.name}`);
+    }
 
     updateDeckBadges();
     updateControlState();
