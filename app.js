@@ -653,59 +653,6 @@ class Simulator {
     return true;
   }
 
-  // Called by UI to draw a card for the manual player while waiting
-  manualPlayerDraw(playerId) {
-    const idx = this.players.findIndex((p) => p.id === playerId);
-    if (idx === -1) return;
-    const player = this.players[idx];
-    this.draw(player, true);
-    renderBoard();
-  }
-
-  // Complete the manual player's turn: run main/combat/end and advance
-  completeManualTurn() {
-    if (!this.waitingForManual) return;
-    const active = this.players[this.activePlayerIndex];
-    const opponent = this.players[(this.activePlayerIndex + 1) % 2];
-    this.phase = 'main';
-    this.mainPhase(active, opponent);
-    this.phase = 'combat';
-    this.combat(active, opponent);
-    this.phase = 'end';
-    this.endStep(active);
-
-    if (this.checkWinner()) {
-      this.gameOver = true;
-      this.log('GAME', `Winner: ${this.winner.name}`, 'win');
-      this.waitingForManual = false;
-      renderBoard();
-      return;
-    }
-
-    // advance turn
-    this.activePlayerIndex = (this.activePlayerIndex + 1) % 2;
-    this.turn += this.activePlayerIndex === 0 ? 1 : 0;
-    this.waitingForManual = false;
-
-    // If next player is manual, immediately perform their untap/draw and pause
-    const next = this.players[this.activePlayerIndex];
-    if ((next.id === 'A' && manualMode.A) || (next.id === 'B' && manualMode.B)) {
-      // perform untap/draw and remain paused awaiting user
-      this.phase = 'untap';
-      this.untap(next);
-      this.phase = 'draw';
-      this.draw(next, true);
-      this.phase = 'manual';
-      this.log(next.id, `${next.name} awaiting manual actions`);
-      this.waitingForManual = true;
-      renderBoard();
-      return;
-    }
-
-    // Otherwise, if we were running before manual, resume automatic play
-    if (this.wasRunningBeforeManual) this.start();
-    renderBoard();
-  }
 
   log(source, message, className = "") {
     const entry = {
@@ -736,8 +683,6 @@ const ui = {
   slowerBtn: document.getElementById("slowerBtn"),
   fasterBtn: document.getElementById("fasterBtn"),
   enableAudioBtn: document.getElementById("enableAudioBtn"),
-  manualP1Btn: document.getElementById("manualP1Btn"),
-  manualP2Btn: document.getElementById("manualP2Btn"),
   speedBadge: document.getElementById("speedBadge"),
   audioBadge: document.getElementById("audioBadge"),
   moveConsole: document.getElementById("moveConsole"),
@@ -758,8 +703,6 @@ let simSpeed = 1400;
 const uploadedDecks = { A: null, B: null };
 let d20Rolls = { A: null, B: null };
 let winCounters = { A: 0, B: 0 };
-// Manual play flags: when true the corresponding player will require manual actions
-const manualMode = { A: false, B: false };
 
 function appendLog(entry) {
   if (!entry.at) entry.at = new Date().toLocaleTimeString();
@@ -836,10 +779,6 @@ function renderBoard() {
           <div class="player-header">
             <strong>${p.name}</strong>
             ${displayCommander}
-            ${simulator && ((p.id === 'A' && manualMode.A) || (p.id === 'B' && manualMode.B)) ? `<div class="manual-controls">
-              <button class="manual-draw" data-player="${p.id}" aria-label="Manual draw for ${escapeHtml(p.name)}">Draw</button>
-              <button class="manual-end" data-player="${p.id}" aria-label="End turn for ${escapeHtml(p.name)}">End Turn</button>
-            </div>` : ''}
           </div>
           <div class="mat">
             <div class="zone zone-main">
@@ -1028,26 +967,6 @@ ui.enableAudioBtn.addEventListener("click", async () => {
   }
 });
 
-// Manual mode toggles
-if (ui.manualP1Btn) {
-  ui.manualP1Btn.addEventListener('click', (ev) => {
-    manualMode.A = !manualMode.A;
-    ui.manualP1Btn.setAttribute('aria-pressed', manualMode.A ? 'true' : 'false');
-    ui.manualP1Btn.classList.toggle('active', manualMode.A);
-    appendLog({ turn: 0, phase: 'system', source: 'UI', message: `Manual mode for Player 1 ${manualMode.A ? 'ENABLED' : 'DISABLED'}` });
-    renderBoard();
-  });
-}
-if (ui.manualP2Btn) {
-  ui.manualP2Btn.addEventListener('click', (ev) => {
-    manualMode.B = !manualMode.B;
-    ui.manualP2Btn.setAttribute('aria-pressed', manualMode.B ? 'true' : 'false');
-    ui.manualP2Btn.classList.toggle('active', manualMode.B);
-    appendLog({ turn: 0, phase: 'system', source: 'UI', message: `Manual mode for Player 2 ${manualMode.B ? 'ENABLED' : 'DISABLED'}` });
-    renderBoard();
-  });
-}
-
 ui.tableWrap.addEventListener("click", async () => {
   await audio.ensureContext();
   updateAudioBadge();
@@ -1078,34 +997,8 @@ ui.startBtn.addEventListener("click", async () => {
     // reset win counters
     winCounters = { A: 0, B: 0 };
     updateWinBadges();
-
-    // Disable controls while running
-    ui.startBtn.disabled = true;
-    ui.resetBtn.disabled = true;
-    ui.uploadDeck1Btn.disabled = true;
-    ui.uploadDeck2Btn.disabled = true;
-    const silent = Boolean(ui.silentRunCheckbox && ui.silentRunCheckbox.checked);
-
-    if (silent) {
       const active = this.players[this.activePlayerIndex];
       const opponent = this.players[(this.activePlayerIndex + 1) % 2];
-
-      // If the active player is in manual mode, perform untap+draw, then pause and wait for manual actions
-      if ((active.id === 'A' && manualMode.A) || (active.id === 'B' && manualMode.B)) {
-        // perform untap and draw for the manual player, then pause simulator to await user actions
-        this.phase = 'untap';
-        this.untap(active);
-        this.phase = 'draw';
-        this.draw(active, true);
-        this.phase = 'manual';
-        this.log(active.id, `${active.name} awaiting manual actions`);
-        // remember if we were running so we can restart when appropriate
-        this.wasRunningBeforeManual = !!this.timer;
-        this.pause();
-        this.waitingForManual = true;
-        renderBoard();
-        return;
-      }
 
       this.phase = "untap";
       this.untap(active);
@@ -1122,6 +1015,15 @@ ui.startBtn.addEventListener("click", async () => {
       this.phase = "end";
       this.endStep(active);
 
+      if (this.checkWinner()) {
+        this.gameOver = true;
+        this.pause();
+        this.log("GAME", `Winner: ${this.winner.name}`, "win");
+        return;
+      }
+
+      this.activePlayerIndex = (this.activePlayerIndex + 1) % 2;
+      this.turn += this.activePlayerIndex === 0 ? 1 : 0;
       if (this.checkWinner()) {
         this.gameOver = true;
         this.pause();
@@ -1287,24 +1189,7 @@ ui.playersView.addEventListener("drop", async (event) => {
   await handleDeckUpload(slot, file);
 });
 
-// Handle manual action buttons inside player views (Draw / End Turn)
-ui.playersView.addEventListener('click', (ev) => {
-  const btn = ev.target.closest && ev.target.closest('button');
-  if (!btn) return;
-  if (btn.classList.contains('manual-draw')) {
-    const playerId = btn.dataset.player;
-    if (simulator && typeof simulator.manualPlayerDraw === 'function') {
-      simulator.manualPlayerDraw(playerId);
-    }
-    return;
-  }
-  if (btn.classList.contains('manual-end')) {
-    if (simulator && typeof simulator.completeManualTurn === 'function') {
-      simulator.completeManualTurn();
-    }
-    return;
-  }
-});
+
 
 ui.slowerBtn.addEventListener("click", () => {
   simSpeed = Math.min(3000, simSpeed + 200);
