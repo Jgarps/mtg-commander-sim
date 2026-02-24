@@ -190,25 +190,36 @@ async function fetchCardDetails(name) {
   const cleaned = cleanCardName(name);
   if (!cleaned) return null;
   if (cardMetaCache.has(cleaned)) return cardMetaCache.get(cleaned);
-  // Strip common ManaBox-style suffixes (set code, collector number, foil markers)
-  // Examples removed: " (F11) 12 *F*", " (SET) 12345", and any trailing flags
-  let queryName = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim();
-  queryName = queryName.replace(/\s*\*.*\*$/g, '').trim();
 
-  let cardData = null;
-  try {
-    const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
-    let response = await fetch(byExact);
-    if (!response.ok) {
-      const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
-      response = await fetch(byFuzzy);
+  // queued fetch with retries to avoid rate-limits/CORS 429s
+  const queryNameBase = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim().replace(/\s*\*.*\*$/g, '').trim();
+  const DETAILS_QUEUE_CONCURRENCY = 3;
+
+  async function _doFetchDetails(queryName) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
+        let response = await fetch(byExact);
+        if (!response.ok) {
+          const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
+          response = await fetch(byFuzzy);
+        }
+        if (!response.ok) {
+          if (response.status === 429 || response.status >= 500) throw new Error(`Transient ${response.status}`);
+          return null;
+        }
+        const cardData = await response.json();
+        return cardData;
+      } catch (err) {
+        const backoff = 300 * Math.pow(2, attempt) + Math.floor(Math.random() * 200);
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, backoff));
+      }
     }
-    if (response.ok) {
-      cardData = await response.json();
-    }
-  } catch {
-    cardData = null;
+    return null;
   }
+
+  const cardData = await _doFetchDetails(queryNameBase);
 
   const classified = classifyCardForSimulator(cardData || {});
   const resolved = {
