@@ -997,42 +997,41 @@ ui.startBtn.addEventListener("click", async () => {
     // reset win counters
     winCounters = { A: 0, B: 0 };
     updateWinBadges();
-      const active = this.players[this.activePlayerIndex];
-      const opponent = this.players[(this.activePlayerIndex + 1) % 2];
 
-      this.phase = "untap";
-      this.untap(active);
+    // Disable controls while running
+    ui.startBtn.disabled = true;
+    ui.resetBtn.disabled = true;
+    ui.uploadDeck1Btn.disabled = true;
+    ui.uploadDeck2Btn.disabled = true;
+    const silent = Boolean(ui.silentRunCheckbox && ui.silentRunCheckbox.checked);
 
-      this.phase = "draw";
-      this.draw(active, true);
+    if (silent) {
+      // Fast silent batch: run simulations synchronously (but yield to UI between runs)
+      setBatchProgress(0, runs);
+      try {
+        for (let i = 0; i < runs; i += 1) {
+          const runIndex = i + 1;
+          ui.metaStats.textContent = `Running silent run ${runIndex} / ${runs}...`;
 
-      this.phase = "main";
-      this.mainPhase(active, opponent);
+          const aRoll = rollD20();
+          const bRoll = rollD20();
+          const starting = aRoll > bRoll ? 0 : 1;
 
-      this.phase = "combat";
-      this.combat(active, opponent);
+          // Use a no-op logger to avoid heavy DOM updates during silent runs
+          const batchSim = new Simulator(uploadedDecks.A, uploadedDecks.B, () => {}, starting);
 
-      this.phase = "end";
-      this.endStep(active);
+          let ticks = 0;
+          while (!batchSim.gameOver) {
+            batchSim.tick();
+            ticks += 1;
+            // periodically yield to the event loop so the UI can update
+            if ((ticks & 0x3FF) === 0) await new Promise((r) => setTimeout(r, 0));
+          }
 
-      if (this.checkWinner()) {
-        this.gameOver = true;
-        this.pause();
-        this.log("GAME", `Winner: ${this.winner.name}`, "win");
-        return;
-      }
-
-      this.activePlayerIndex = (this.activePlayerIndex + 1) % 2;
-      this.turn += this.activePlayerIndex === 0 ? 1 : 0;
-      if (this.checkWinner()) {
-        this.gameOver = true;
-        this.pause();
-        this.log("GAME", `Winner: ${this.winner.name}`, "win");
-        return;
-      }
-
-      this.activePlayerIndex = (this.activePlayerIndex + 1) % 2;
-      this.turn += this.activePlayerIndex === 0 ? 1 : 0;
+          if (batchSim.winner?.id === 'A') winCounters.A += 1;
+          else if (batchSim.winner?.id === 'B') winCounters.B += 1;
+          updateWinBadges();
+          setBatchProgress(runIndex, runs);
           console.log(`Silent batch run ${runIndex} finished after ${ticks} ticks, winner: ${batchSim.winner?.id || 'none'}`);
           // yield briefly between runs to allow repaint
           // eslint-disable-next-line no-await-in-loop
