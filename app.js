@@ -255,6 +255,18 @@ async function buildSimulationDeck(parsedDeck) {
     } catch (e) { /* ignore */ }
   }
 
+  // Ensure commander metadata/art is fetched and seeded so the command zone can render correctly
+  try {
+    const cmdName = parsedDeck.commander;
+    if (cmdName) {
+      const cmdDetails = await fetchCardDetails(cmdName);
+      const cleanedCmd = cleanCardName(cmdName);
+      if (cmdDetails?.image) cardArtCache.set(cleanedCmd, cmdDetails.image);
+    }
+  } catch (e) {
+    /* ignore commander fetch errors */
+  }
+
   return {
     name: parsedDeck.name,
     commander: parsedDeck.commander,
