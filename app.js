@@ -742,7 +742,7 @@ function renderBoard() {
     return;
   }
 
-  ui.metaStats.textContent = `Turn ${simulator.turn} • Phase: ${simulator.phase.toUpperCase()} • Active: ${simulator.players[simulator.activePlayerIndex].name} • Speed: ${simSpeed}ms • Logs: Dev Console`;
+  ui.metaStats.textContent = `Turn ${simulator.turn} • Phase: ${simulator.phase.toUpperCase()} • Active: ${simulator.players[simulator.activePlayerIndex].name} • Speed: ${simSpeed}ms`;
 
   const recentMoves = logs.slice(-10).map((entry) => `[T${entry.turn}] ${entry.phase.toUpperCase()}: ${entry.message}`);
   ui.moveConsole.textContent = recentMoves.length ? recentMoves.join("\n") : "No moves yet.";
@@ -756,6 +756,8 @@ function renderBoard() {
       const recentGraveyard = (p.graveyard || []).slice(-6).reverse();
       const recentExile = (p.exile || []).slice(-6).reverse();
 
+      const displayCommander = p.commander && !(p.name || '').includes(p.commander) ? `<span>${escapeHtml(p.commander)}</span>` : '';
+
       const renderCardTile = (card, zone) => {
         const art = getCardArt(card.name);
         const cardName = escapeHtml(card.name);
@@ -764,12 +766,11 @@ function renderBoard() {
           <span>${cardName}</span>
         </div>`;
       };
-
       return `
         <article class="player-card ${p.life <= 0 ? "dead" : ""}">
           <div class="player-header">
             <strong>${p.name}</strong>
-            <span>${p.commander}</span>
+            ${displayCommander}
           </div>
           <div class="mat">
             <div class="zone zone-main">
