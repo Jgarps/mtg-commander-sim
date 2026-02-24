@@ -475,6 +475,62 @@ class Simulator {
     const card = player.library.pop();
     player.hand.push(card);
     if (announce) this.log(player.id, `${player.name} draws a card`);
+    // Enforce maximum hand size after any draw
+    this.enforceHandLimit(player);
+  }
+
+  // Evaluate a card's value in the current player state. Higher = more valuable.
+  evaluateCardValue(player, card) {
+    if (!card) return -Infinity;
+    // Base priority by type (higher is better)
+    const typePriority = {
+      threat: 100,
+      removal: 80,
+      draw: 70,
+      ramp: 65,
+      utility: 50,
+      land: 40,
+    };
+
+    let value = typePriority[card.type] ?? 30;
+
+    // Threats are more valuable with higher power
+    value += (card.power || 0) * 2;
+
+    // Cheaper spells are slightly more playable (increase value)
+    const cost = Math.max(0, Number(card.cost) || 0);
+    value += Math.max(0, 6 - cost);
+
+    // Lands are more valuable when the player has few lands in play
+    if (card.type === 'land') {
+      value += Math.max(0, 4 - player.landsInPlay) * 6;
+    }
+
+    // Ramp/draw are more valuable when mana is low
+    if (card.type === 'ramp' && player.manaAvailable <= 1) value += 8;
+    if (card.type === 'draw' && player.hand.length <= 4) value += 6;
+
+    return value;
+  }
+
+  // Ensure player's hand does not exceed 7 cards by discarding lowest-value cards
+  enforceHandLimit(player) {
+    const MAX_HAND = 7;
+    while (player.hand.length > MAX_HAND) {
+      let worstIdx = 0;
+      let worstVal = Infinity;
+      for (let i = 0; i < player.hand.length; i += 1) {
+        const c = player.hand[i];
+        const val = this.evaluateCardValue(player, c);
+        if (val < worstVal) {
+          worstVal = val;
+          worstIdx = i;
+        }
+      }
+      const [discarded] = player.hand.splice(worstIdx, 1);
+      player.graveyard.push(discarded);
+      this.log(player.id, `${player.name} discards ${discarded.name} to maintain a ${MAX_HAND}-card hand`, 'discard');
+    }
   }
 
   playLand(player) {
