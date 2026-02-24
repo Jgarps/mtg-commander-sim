@@ -762,7 +762,8 @@ function renderBoard() {
       const threats = p.battlefield.filter((c) => c.type === "threat").slice(0, 16);
       const lands = p.battlefield.filter((c) => c.type === "land").slice(0, 16);
       const recentGraveyard = (p.graveyard || []).slice(-6).reverse();
-      const recentExile = (p.exile || []).slice(-6).reverse();
+      // Normalize exile entries: some code paths may push a name string instead of an object
+      const recentExile = (p.exile || []).slice(-6).reverse().map((e) => (e && typeof e === 'object') ? e : { name: String(e || 'Unknown') });
 
       const displayCommander = p.commander && !(p.name || '').includes(p.commander) ? `<span>${escapeHtml(p.commander)}</span>` : '';
 
