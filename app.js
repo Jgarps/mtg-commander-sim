@@ -752,8 +752,8 @@ function renderBoard() {
     .map((p) => {
       const threats = p.battlefield.filter((c) => c.type === "threat").slice(0, 16);
       const lands = p.battlefield.filter((c) => c.type === "land").slice(0, 16);
-      const recentGraveyard = p.graveyard.slice(-6).reverse();
-      const recentExile = p.exile.slice(-6).reverse();
+      const recentGraveyard = (p.graveyard || []).slice(-6).reverse();
+      const recentExile = (p.exile || []).slice(-6).reverse();
 
       const renderCardTile = (card, zone) => {
         const art = getCardArt(card.name);
