@@ -162,6 +162,10 @@ function classifyCardForSimulator(cardData) {
   const power = Number.isFinite(parsedPower) ? parsedPower : 0;
 
   if (typeLine.includes("land")) return { type: "land", cost: 0, power: 0 };
+  // Prioritize actual card types like creatures/planeswalkers before heuristic text matches
+  if (typeLine.includes("creature") || typeLine.includes("planeswalker")) {
+    return { type: "threat", cost: cmc, power };
+  }
 
   const drawPattern = /draw\s+(?:a|one|two|three|x|\d+)\s+cards?/;
   if (drawPattern.test(oracleText) || oracleText.includes("draw a card")) {
@@ -177,10 +181,6 @@ function classifyCardForSimulator(cardData) {
   if (removalPattern.test(oracleText)) {
     const exiles = /exile/.test(oracleText);
     return { type: "removal", cost: cmc, power, exiles };
-  }
-
-  if (typeLine.includes("creature") || typeLine.includes("planeswalker")) {
-    return { type: "threat", cost: cmc, power };
   }
 
   return { type: "utility", cost: cmc, power };
