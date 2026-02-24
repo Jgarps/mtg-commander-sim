@@ -760,8 +760,7 @@ class Simulator {
           opponent.commandZone = { name: opponent.commander };
           this.log(player.id, `${player.name} removes opponent commander ${killed.name}; it returns to the command zone`);
         } else if (card.exiles) {
-          opponent.exile.push(killed);
-          this.log(player.id, `${player.name} exiles opponent ${killed.name}`);
+          this.exileCard(opponent, killed, player);
         } else {
           opponent.graveyard.push(killed);
           this.log(player.id, `${player.name} removes opponent ${killed.name}`);
@@ -792,6 +791,17 @@ class Simulator {
     }
 
     player.battlefield.push(card);
+  }
+
+  exileCard(targetPlayer, card, byPlayer) {
+    try {
+      targetPlayer.exile.push(card);
+      // Log who exiled what so the UI move console shows it clearly
+      this.log(byPlayer.id, `${byPlayer.name} exiles ${card.name}` , 'exile');
+    } catch (e) {
+      // fallback: push without logging
+      try { targetPlayer.exile.push(card); } catch { /* ignore */ }
+    }
   }
 
   combat(player, opponent) {
