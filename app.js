@@ -1,0 +1,1134 @@
+const CARD_BACK_PLACEHOLDER = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='488' height='680'%3E%3Crect width='100%25' height='100%25' fill='%2310182f'/%3E%3Crect x='20' y='20' width='448' height='640' rx='26' ry='26' fill='%231a2447' stroke='%23384d86' stroke-width='8'/%3E%3Ctext x='50%25' y='50%25' fill='%23d9e2ff' font-size='38' text-anchor='middle' font-family='Segoe UI, Arial' dy='0.3em'%3EMTG%3C/text%3E%3C/svg%3E";
+const cardArtCache = new Map();
+const pendingCardArt = new Set();
+const cardMetaCache = new Map();
+
+function cleanCardName(name) {
+  return String(name || "").replace(/\s*\(Auto-fill\)$/i, "").trim();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function getCardArt(name) {
+  const cleaned = cleanCardName(name);
+  if (!cleaned) return CARD_BACK_PLACEHOLDER;
+  if (cleaned === "Card Back") return CARD_BACK_PLACEHOLDER;
+  if (cardArtCache.has(cleaned)) return cardArtCache.get(cleaned);
+  if (!pendingCardArt.has(cleaned)) {
+    pendingCardArt.add(cleaned);
+    fetchCardArt(cleaned);
+  }
+  return CARD_BACK_PLACEHOLDER;
+}
+
+async function fetchCardArt(name) {
+  try {
+    // Use sanitized query name to avoid ManaBox suffixes causing 404s
+    const cleaned = cleanCardName(name);
+    let queryName = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim();
+    queryName = queryName.replace(/\s*\*.*\*$/g, '').trim();
+
+    const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
+    let response = await fetch(byExact);
+    if (!response.ok) {
+      const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
+      response = await fetch(byFuzzy);
+    }
+    if (!response.ok) throw new Error("No card image found");
+
+    const card = await response.json();
+    const image = card?.image_uris?.normal || card?.card_faces?.[0]?.image_uris?.normal || CARD_BACK_PLACEHOLDER;
+    // cache art keyed by the cleaned display name so UI mapping stays consistent
+    cardArtCache.set(cleaned, image);
+  } catch {
+    const cleaned = cleanCardName(name);
+    cardArtCache.set(cleaned, CARD_BACK_PLACEHOLDER);
+  } finally {
+    const cleaned = cleanCardName(name);
+    pendingCardArt.delete(cleaned);
+    renderBoard();
+  }
+}
+
+function normalizeDeckLine(line) {
+  return String(line || "").replace(/\uFEFF/g, "").trim();
+}
+
+function parseDeckListText(text, fallbackName = "Uploaded Deck") {
+  const lines = String(text || "").split(/\r?\n/);
+  const cards = [];
+  let commander = "";
+  let commanderNext = false;
+
+  for (const rawLine of lines) {
+    const line = normalizeDeckLine(rawLine);
+    if (!line) continue;
+
+    if (line.startsWith("//")) {
+      commanderNext = /commander/i.test(line);
+      continue;
+    }
+
+    const match = line.match(/^(\d+)\s+(.+?)(?:\s+\([^)]+\)\s+[A-Za-z0-9-]+)?$/);
+    if (!match) continue;
+
+    const count = Number(match[1]);
+    const name = cleanCardName(match[2]);
+    if (!name || !Number.isFinite(count) || count <= 0) continue;
+
+    if (commanderNext && !commander) {
+      commander = name;
+      commanderNext = false;
+      continue;
+    }
+
+    cards.push({ name, count });
+  }
+
+  if (!commander) throw new Error("Commander not found. Include a '// COMMANDER' section with one commander line.");
+  if (!cards.length) throw new Error("No deck cards found after commander.");
+
+  return {
+    name: `${fallbackName} (${commander})`,
+    commander,
+    cards,
+  };
+}
+
+function classifyCardForSimulator(cardData) {
+  const typeLine = String(cardData?.type_line || cardData?.card_faces?.map((face) => face?.type_line || "").join(" ") || "").toLowerCase();
+  const oracleText = String(cardData?.oracle_text || cardData?.card_faces?.map((face) => face?.oracle_text || "").join(" ") || "").toLowerCase();
+  const cmc = Math.max(0, Math.round(Number(cardData?.cmc) || 0));
+  const powerText = cardData?.power ?? cardData?.card_faces?.find((face) => face?.power != null)?.power;
+  const parsedPower = Number.parseInt(powerText, 10);
+  const power = Number.isFinite(parsedPower) ? parsedPower : 0;
+
+  if (typeLine.includes("land")) return { type: "land", cost: 0, power: 0 };
+
+  const drawPattern = /draw\s+(?:a|one|two|three|x|\d+)\s+cards?/;
+  if (drawPattern.test(oracleText) || oracleText.includes("draw a card")) {
+    return { type: "draw", cost: cmc, power };
+  }
+
+  const rampPattern = /add\s*\{|search your library.*land|treasure token|costs\s+\d+\s+less\s+to\s+cast|untap target land/;
+  if (rampPattern.test(oracleText)) {
+    return { type: "ramp", cost: cmc, power };
+  }
+
+  const removalPattern = /destroy|exile|counter target|deals?\s+\d+\s+damage\s+to\s+target|return target.*to (?:its|their) owner'?s hand|target player sacrifices/;
+  if (removalPattern.test(oracleText)) {
+    return { type: "removal", cost: cmc, power };
+  }
+
+  if (typeLine.includes("creature") || typeLine.includes("planeswalker")) {
+    return { type: "threat", cost: cmc, power };
+  }
+
+  return { type: "utility", cost: cmc, power };
+}
+
+async function fetchCardDetails(name) {
+  const cleaned = cleanCardName(name);
+  if (!cleaned) return null;
+  if (cardMetaCache.has(cleaned)) return cardMetaCache.get(cleaned);
+  // Strip common ManaBox-style suffixes (set code, collector number, foil markers)
+  // Examples removed: " (F11) 12 *F*", " (SET) 12345", and any trailing flags
+  let queryName = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim();
+  queryName = queryName.replace(/\s*\*.*\*$/g, '').trim();
+
+  let cardData = null;
+  try {
+    const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
+    let response = await fetch(byExact);
+    if (!response.ok) {
+      const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
+      response = await fetch(byFuzzy);
+    }
+    if (response.ok) {
+      cardData = await response.json();
+    }
+  } catch {
+    cardData = null;
+  }
+
+  const classified = classifyCardForSimulator(cardData || {});
+  const resolved = {
+    name: cleaned,
+    type: classified.type,
+    cost: classified.cost,
+    power: classified.power,
+  };
+
+  cardMetaCache.set(cleaned, resolved);
+  return resolved;
+}
+
+async function buildSimulationDeck(parsedDeck) {
+  const cards = [];
+
+  for (const entry of parsedDeck.cards) {
+    const details = await fetchCardDetails(entry.name);
+    cards.push({
+      name: entry.name,
+      count: entry.count,
+      type: details?.type || "utility",
+      cost: details?.cost ?? 0,
+      power: details?.power ?? 0,
+    });
+  }
+
+  return {
+    name: parsedDeck.name,
+    commander: parsedDeck.commander,
+    cards,
+  };
+}
+
+class AudioEngine {
+  constructor() {
+    this.ctx = null;
+    this.masterGain = null;
+    this.sfxGain = null;
+    this.volume = 0.45;
+    this.isUnlocked = false;
+    this.lastSfxAt = { draw: 0, move: 0, attack: 0, graveyard: 0 };
+  }
+
+  async ensureContext() {
+    if (this.ctx) {
+      if (this.ctx.state === "suspended") {
+        try {
+          await this.ctx.resume();
+        } catch {
+          return false;
+        }
+      }
+      this.isUnlocked = this.ctx.state === "running";
+      return this.isUnlocked;
+    }
+
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new AC();
+    } catch {
+      return false;
+    }
+
+    this.masterGain = this.ctx.createGain();
+    this.sfxGain = this.ctx.createGain();
+
+    this.masterGain.gain.value = this.volume;
+    this.sfxGain.gain.value = 0.6;
+
+    this.sfxGain.connect(this.masterGain);
+    this.masterGain.connect(this.ctx.destination);
+
+    if (this.ctx.state === "suspended") {
+      try {
+        await this.ctx.resume();
+      } catch {
+        return false;
+      }
+    }
+    this.isUnlocked = this.ctx.state === "running";
+    return this.isUnlocked;
+  }
+
+  async unlockAndTest() {
+    const ok = await this.ensureContext();
+    if (!ok) return false;
+    this.playSfx("move");
+    setTimeout(() => this.playSfx("draw"), 90);
+    return true;
+  }
+
+  getStateLabel() {
+    if (!this.ctx) return "Locked";
+    if (this.ctx.state === "running") return "On";
+    return "Locked";
+  }
+
+  setVolume(value) {
+    this.volume = value;
+    if (this.masterGain) this.masterGain.gain.value = value;
+  }
+
+
+
+  playSfx(type) {
+    if (!this.ctx || this.ctx.state !== "running") return;
+    const now = this.ctx.currentTime;
+    const cooldown = 0.06;
+    if (now - (this.lastSfxAt[type] || 0) < cooldown) return;
+    this.lastSfxAt[type] = now;
+
+    if (type === "draw") {
+      this.sweep(now, 740, 980, 0.08, 0.2, "triangle");
+      return;
+    }
+    if (type === "move") {
+      this.sweep(now, 220, 300, 0.06, 0.17, "square");
+      return;
+    }
+    if (type === "attack") {
+      this.sweep(now, 180, 110, 0.1, 0.24, "sawtooth");
+      return;
+    }
+    if (type === "graveyard") {
+      this.sweep(now, 420, 120, 0.12, 0.2, "triangle");
+    }
+  }
+
+  sweep(when, fromFreq, toFreq, duration, gainValue, waveType) {
+    if (!this.ctx || this.ctx.state !== "running") return;
+    const osc = this.ctx.createOscillator();
+    const gain = this.ctx.createGain();
+    const filter = this.ctx.createBiquadFilter();
+
+    filter.type = "bandpass";
+    filter.frequency.value = Math.max(180, Math.min(1600, fromFreq));
+    osc.type = waveType;
+    osc.frequency.setValueAtTime(fromFreq, when);
+    osc.frequency.exponentialRampToValueAtTime(Math.max(40, toFreq), when + duration);
+
+    gain.gain.setValueAtTime(0.0001, when);
+    gain.gain.exponentialRampToValueAtTime(gainValue, when + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, when + duration);
+
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(this.sfxGain);
+    osc.start(when);
+    osc.stop(when + duration + 0.02);
+  }
+
+  getSfxType(entry) {
+    const text = entry.message.toLowerCase();
+    if (text.includes("draws a card") || text.includes("draws 2 cards")) return "draw";
+    if (text.includes("attacks for")) return "attack";
+    if (text.includes("plays a land") || text.includes("casts") || text.includes("deploys threat") || text.includes("ramps a land")) return "move";
+    if (text.includes("removes opponent") || text.includes("loses")) return "graveyard";
+    return null;
+  }
+
+  handleLog(entry) {
+    const type = this.getSfxType(entry);
+    if (!type) return;
+    this.playSfx(type);
+  }
+}
+
+function expandDeck(deckConfig) {
+  const list = [];
+  deckConfig.cards.forEach((entry) => {
+    for (let i = 0; i < entry.count; i += 1) {
+      list.push({
+        name: entry.name,
+        type: entry.type,
+        cost: entry.cost ?? 0,
+        power: entry.power ?? 0,
+      });
+    }
+  });
+  return list;
+}
+
+function randomIndex(maxExclusive) {
+  if (maxExclusive <= 1) return 0;
+  if (window.crypto?.getRandomValues) {
+    const range = 0x100000000;
+    const threshold = range - (range % maxExclusive);
+    const buffer = new Uint32Array(1);
+    let value = 0;
+    do {
+      window.crypto.getRandomValues(buffer);
+      value = buffer[0];
+    } while (value >= threshold);
+    return value % maxExclusive;
+  }
+  return Math.floor(Math.random() * maxExclusive);
+}
+
+function rollD20() {
+  return randomIndex(20) + 1;
+}
+
+function shuffle(array) {
+  const copy = [...array];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = randomIndex(i + 1);
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+}
+
+function createPlayer(deckConfig, id) {
+  return {
+    id,
+    name: deckConfig.name,
+    commander: deckConfig.commander,
+    library: shuffle(expandDeck(deckConfig)),
+    hand: [],
+    battlefield: [],
+    graveyard: [],
+    life: 40,
+    manaAvailable: 0,
+    landsInPlay: 0,
+    landsPlayedThisTurn: 0,
+    damageThisCombat: 0,
+  };
+}
+
+class Simulator {
+  constructor(deckA, deckB, logger, startingPlayerIndex = 0) {
+    this.logger = logger;
+    this.speed = 700;
+    this.timer = null;
+    this.turn = 1;
+    this.activePlayerIndex = startingPlayerIndex;
+    this.phase = "setup";
+    this.players = [createPlayer(deckA, "A"), createPlayer(deckB, "B")];
+    this.gameOver = false;
+    this.winner = null;
+
+    this.players.forEach((player) => {
+      for (let i = 0; i < 7; i += 1) this.draw(player, false);
+    });
+    this.log("SYSTEM", `Game initialized: ${this.players[0].name} vs ${this.players[1].name}`);
+  }
+
+  setSpeed(ms) {
+    this.speed = ms;
+    if (this.timer) {
+      this.pause();
+      this.start();
+    }
+  }
+
+  start() {
+    if (this.timer || this.gameOver) return;
+    this.timer = setInterval(() => this.tick(), this.speed);
+    this.log("SYSTEM", "Simulation started");
+  }
+
+  pause() {
+    if (!this.timer) return;
+    clearInterval(this.timer);
+    this.timer = null;
+    this.log("SYSTEM", "Simulation paused");
+  }
+
+  step() {
+    if (this.gameOver) return;
+    this.tick();
+  }
+
+  tick() {
+    const active = this.players[this.activePlayerIndex];
+    const opponent = this.players[(this.activePlayerIndex + 1) % 2];
+
+    this.phase = "untap";
+    this.untap(active);
+
+    this.phase = "draw";
+    this.draw(active, true);
+
+    this.phase = "main";
+    this.mainPhase(active, opponent);
+
+    this.phase = "combat";
+    this.combat(active, opponent);
+
+    this.phase = "end";
+    this.endStep(active);
+
+    if (this.checkWinner()) {
+      this.gameOver = true;
+      this.pause();
+      this.log("GAME", `Winner: ${this.winner.name}`, "win");
+      return;
+    }
+
+    this.activePlayerIndex = (this.activePlayerIndex + 1) % 2;
+    this.turn += this.activePlayerIndex === 0 ? 1 : 0;
+  }
+
+  untap(player) {
+    player.manaAvailable = player.landsInPlay;
+    player.landsPlayedThisTurn = 0;
+    this.log(player.id, `${player.name} untaps and has ${player.manaAvailable} mana from lands`);
+  }
+
+  draw(player, announce) {
+    if (player.library.length === 0) {
+      player.life = 0;
+      this.log(player.id, `${player.name} tried to draw from empty library and loses`, "dead");
+      return;
+    }
+    const card = player.library.pop();
+    player.hand.push(card);
+    if (announce) this.log(player.id, `${player.name} draws a card`);
+  }
+
+  playLand(player) {
+    if (player.landsPlayedThisTurn >= 1) return false;
+    const idx = player.hand.findIndex((c) => c.type === "land");
+    if (idx === -1) return false;
+    const [land] = player.hand.splice(idx, 1);
+    player.battlefield.push(land);
+    player.landsInPlay += 1;
+    player.landsPlayedThisTurn += 1;
+    player.manaAvailable += 1;
+    this.log(player.id, `${player.name} plays a land (${player.landsInPlay} in play)`);
+    return true;
+  }
+
+  mainPhase(player, opponent) {
+    // Try to play a land first
+    this.playLand(player);
+
+    // Find playable spells (non-lands) within available mana
+    const playable = player.hand.filter((c) => c.type !== "land" && (c.cost || 0) <= player.manaAvailable);
+    if (playable.length === 0) {
+      this.log(player.id, `${player.name} takes no main actions`);
+      return;
+    }
+
+    const priority = ["ramp", "draw", "threat", "removal", "utility"];
+    playable.sort((a, b) => {
+      const pa = priority.indexOf(a.type);
+      const pb = priority.indexOf(b.type);
+      if (pa !== pb) return pa - pb;
+      return (b.power || 0) - (a.power || 0);
+    });
+
+    const chosen = playable[0];
+    const idx = player.hand.findIndex((c) => c.name === chosen.name && c.type === chosen.type && (c.cost || 0) === (chosen.cost || 0));
+    if (idx === -1) {
+      this.log(player.id, `${player.name} couldn't locate chosen card in hand`);
+      return;
+    }
+
+    const [card] = player.hand.splice(idx, 1);
+    player.manaAvailable = Math.max(0, player.manaAvailable - (card.cost || 0));
+    this.resolveSpell(card, player, opponent);
+  }
+
+  resolveSpell(card, player, opponent) {
+    this.log(player.id, `${player.name} casts ${card.name} (${card.type})`);
+
+    if (card.type === "ramp") {
+      const hit = player.library.findIndex((c) => c.type === "land");
+      if (hit >= 0) {
+        const [land] = player.library.splice(hit, 1);
+        player.battlefield.push(land);
+        player.landsInPlay += 1;
+        this.log(player.id, `${player.name} ramps a land to battlefield`);
+      }
+      player.graveyard.push(card);
+      return;
+    }
+
+    if (card.type === "draw") {
+      this.draw(player, false);
+      this.draw(player, false);
+      this.log(player.id, `${player.name} draws 2 cards from draw spell`);
+      player.graveyard.push(card);
+      return;
+    }
+
+    if (card.type === "removal") {
+      const target = opponent.battlefield.findIndex((c) => c.type === "threat");
+      if (target >= 0) {
+        const [killed] = opponent.battlefield.splice(target, 1);
+        opponent.graveyard.push(killed);
+        this.log(player.id, `${player.name} removes opponent ${killed.name}`);
+      } else {
+        this.log(player.id, `${player.name} has no good removal target`);
+      }
+      player.graveyard.push(card);
+      return;
+    }
+
+    if (card.type === "threat") {
+      player.battlefield.push(card);
+      this.log(player.id, `${player.name} deploys threat (power ${card.power || 0})`);
+      return;
+    }
+
+    player.battlefield.push(card);
+  }
+
+  combat(player, opponent) {
+    const attackers = player.battlefield.filter((c) => c.type === "threat");
+    const damage = attackers.reduce((sum, c) => sum + (c.power || 0), 0);
+    if (damage > 0) {
+      opponent.life -= damage;
+      player.damageThisCombat = damage;
+      this.log(player.id, `${player.name} attacks for ${damage}. ${opponent.name} to ${opponent.life}`);
+    } else {
+      this.log(player.id, `${player.name} has no attacks`);
+    }
+  }
+
+  endStep(player) {
+    player.damageThisCombat = 0;
+  }
+
+  checkWinner() {
+    const dead = this.players.filter((p) => p.life <= 0);
+    if (dead.length === 0) return false;
+    this.winner = this.players.find((p) => p.life > 0) || this.players[0];
+    return true;
+  }
+
+  log(source, message, className = "") {
+    const entry = {
+      turn: this.turn,
+      phase: this.phase,
+      source,
+      message,
+      className,
+      at: new Date().toLocaleTimeString(),
+    };
+    this.logger(entry);
+  }
+}
+
+const ui = {
+  infoBanner: document.getElementById("infoBanner"),
+  dismissInfoBannerBtn: document.getElementById("dismissInfoBannerBtn"),
+  tableWrap: document.getElementById("tableWrap"),
+  startBtn: document.getElementById("startBtn"),
+  pauseBtn: document.getElementById("pauseBtn"),
+  resetBtn: document.getElementById("resetBtn"),
+  uploadDeck1Btn: document.getElementById("uploadDeck1Btn"),
+  uploadDeck2Btn: document.getElementById("uploadDeck2Btn"),
+  deck1FileInput: document.getElementById("deck1FileInput"),
+  deck2FileInput: document.getElementById("deck2FileInput"),
+  deck1Badge: document.getElementById("deck1Badge"),
+  deck2Badge: document.getElementById("deck2Badge"),
+  slowerBtn: document.getElementById("slowerBtn"),
+  fasterBtn: document.getElementById("fasterBtn"),
+  enableAudioBtn: document.getElementById("enableAudioBtn"),
+  speedBadge: document.getElementById("speedBadge"),
+  audioBadge: document.getElementById("audioBadge"),
+  moveConsole: document.getElementById("moveConsole"),
+  playersView: document.getElementById("playersView"),
+  metaStats: document.getElementById("metaStats"),
+  simCountInput: document.getElementById("simCountInput"),
+  deck1Wins: document.getElementById("deck1Wins"),
+  deck2Wins: document.getElementById("deck2Wins"),
+  silentRunCheckbox: document.getElementById("silentRunCheckbox"),
+  batchProgress: document.getElementById("batchProgress"),
+  batchProgressLabel: document.getElementById("batchProgressLabel"),
+};
+
+let logs = [];
+let simulator = null;
+const audio = new AudioEngine();
+let simSpeed = 1400;
+const uploadedDecks = { A: null, B: null };
+let d20Rolls = { A: null, B: null };
+let winCounters = { A: 0, B: 0 };
+
+function appendLog(entry) {
+  if (!entry.at) entry.at = new Date().toLocaleTimeString();
+  logs.push(entry);
+  if (logs.length > 1500) logs.shift();
+  audio.handleLog(entry);
+  console.log(`[${entry.at}] T${entry.turn} ${entry.phase.toUpperCase()} | ${entry.source} | ${entry.message}`);
+  renderBoard();
+}
+
+function countType(player, type) {
+  return player.battlefield.filter((c) => c.type === type).length;
+}
+
+function renderBoard() {
+  if (!simulator) {
+    ui.metaStats.textContent = "Upload Deck 1 and Deck 2 to start simulation.";
+    ui.moveConsole.textContent = "No moves yet.";
+    ui.playersView.innerHTML = `
+      <article class="player-card">
+        <div class="player-header">
+          <strong>Deck 1</strong>
+          <span>Player A</span>
+        </div>
+        <div class="deck-upload-zone" data-deck-slot="A">
+          <div>
+            <strong>Drop Deck 1 .txt here</strong>
+            <span>or use Upload Deck 1 above</span>
+          </div>
+        </div>
+      </article>
+      <article class="player-card">
+        <div class="player-header">
+          <strong>Deck 2</strong>
+          <span>Player B</span>
+        </div>
+        <div class="deck-upload-zone" data-deck-slot="B">
+          <div>
+            <strong>Drop Deck 2 .txt here</strong>
+            <span>or use Upload Deck 2 above</span>
+          </div>
+        </div>
+      </article>
+    `;
+    return;
+  }
+
+  ui.metaStats.textContent = `Turn ${simulator.turn} • Phase: ${simulator.phase.toUpperCase()} • Active: ${simulator.players[simulator.activePlayerIndex].name} • Speed: ${simSpeed}ms • Logs: Dev Console`;
+
+  const recentMoves = logs.slice(-10).map((entry) => `[T${entry.turn}] ${entry.phase.toUpperCase()}: ${entry.message}`);
+  ui.moveConsole.textContent = recentMoves.length ? recentMoves.join("\n") : "No moves yet.";
+  ui.moveConsole.scrollTop = ui.moveConsole.scrollHeight;
+
+  ui.playersView.innerHTML = simulator.players
+    .map((p) => {
+      const threats = p.battlefield.filter((c) => c.type === "threat").slice(0, 16);
+      const lands = p.battlefield.filter((c) => c.type === "land").slice(0, 16);
+      const recentGraveyard = p.graveyard.slice(-6).reverse();
+
+      const renderCardTile = (card, zone) => {
+        const art = getCardArt(card.name);
+        const cardName = escapeHtml(card.name);
+        return `<div class="card-tile" title="${cardName} [${zone}]">
+          <img src="${art}" alt="${cardName}" loading="lazy" />
+          <span>${cardName}</span>
+        </div>`;
+      };
+
+      return `
+        <article class="player-card ${p.life <= 0 ? "dead" : ""}">
+          <div class="player-header">
+            <strong>${p.name}</strong>
+            <span>${p.commander}</span>
+          </div>
+          <div class="mat">
+            <div class="zone zone-main">
+              <h4>Battlefield</h4>
+              <div class="card-grid">
+                ${threats.length ? threats.map((t) => renderCardTile(t, "battlefield")).join("") : '<span class="badge">No creatures in play</span>'}
+              </div>
+            </div>
+            <div class="zone zone-lands">
+              <h4>Lands</h4>
+              <div class="card-grid small">
+                ${lands.length ? lands.map((l) => renderCardTile(l, "lands")).join("") : '<span class="badge">No lands in play</span>'}
+              </div>
+            </div>
+
+            <div class="zone-side">
+              <div class="zone zone-life">
+                <h4>Life</h4>
+                <div class="life-box">${p.life}</div>
+              </div>
+              <div class="zone zone-command">
+                <h4>Command Zone</h4>
+                <div class="card-grid small">${renderCardTile({ name: p.commander }, "command")}</div>
+              </div>
+              <div class="zone zone-exile">
+                <h4>Exile</h4>
+                <span class="badge">Not tracked in MVP</span>
+              </div>
+              <div class="zone zone-library">
+                <h4>Library</h4>
+                <div class="card-grid small">${renderCardTile({ name: "Card Back" }, "library")}</div>
+                <span class="badge">Cards: ${p.library.length}</span>
+                <span class="badge">Hand: ${p.hand.length}</span>
+                <span class="badge">Mana: ${p.manaAvailable}</span>
+              </div>
+              <div class="zone zone-graveyard">
+                <h4>Graveyard</h4>
+                <div class="card-grid small">
+                  ${recentGraveyard.length ? recentGraveyard.map((g) => renderCardTile(g, "graveyard")).join("") : '<span class="badge">Empty</span>'}
+                </div>
+              </div>
+            </div>
+          </div>
+        </article>
+      `;
+    })
+    .join("");
+}
+
+function resetSimulation(performInitialRoll = false) {
+  console.debug('resetSimulation called', { uploadedDecks, simSpeed, performInitialRoll });
+  if (!uploadedDecks.A || !uploadedDecks.B) {
+    simulator = null;
+    renderBoard();
+    return;
+  }
+
+  if (simulator) simulator.pause();
+  logs = [];
+
+  // Create simulator without performing the first-player roll — caller may request it
+  const startingPlayerIndex = 0;
+  simulator = new Simulator(uploadedDecks.A, uploadedDecks.B, appendLog, startingPlayerIndex);
+  simulator.setSpeed(simSpeed);
+
+  if (performInitialRoll) {
+    d20Rolls.A = rollD20();
+    d20Rolls.B = rollD20();
+    const chosen = d20Rolls.A > d20Rolls.B ? 0 : 1;
+    const rollMessage = `${uploadedDecks.A.name} rolled ${d20Rolls.A}, ${uploadedDecks.B.name} rolled ${d20Rolls.B} - ${simulator.players[chosen].name} goes first!`;
+    appendLog({ turn: 0, phase: "setup", source: "SYSTEM", message: rollMessage, className: "" });
+    simulator.activePlayerIndex = chosen;
+  }
+
+  renderBoard();
+}
+
+function getDeckTotals(deck) {
+  return deck.cards.reduce((sum, card) => sum + (card.count || 0), 0);
+}
+
+function updateDeckBadges() {
+  ui.deck1Badge.textContent = uploadedDecks.A ? `Deck 1: ${uploadedDecks.A.name} (${getDeckTotals(uploadedDecks.A)} cards)` : "Deck 1: Not loaded";
+  ui.deck2Badge.textContent = uploadedDecks.B ? `Deck 2: ${uploadedDecks.B.name} (${getDeckTotals(uploadedDecks.B)} cards)` : "Deck 2: Not loaded";
+}
+
+function updateWinBadges() {
+  try {
+    if (ui.deck1Wins) ui.deck1Wins.textContent = `Wins: ${winCounters.A}`;
+    if (ui.deck2Wins) ui.deck2Wins.textContent = `Wins: ${winCounters.B}`;
+  } catch (e) {
+    console.warn('Could not update win badges', e);
+  }
+}
+
+function setBatchProgress(value, max) {
+  try {
+    if (!ui.batchProgress) return;
+    ui.batchProgress.max = max || 100;
+    ui.batchProgress.value = value;
+    ui.batchProgress.hidden = false;
+    if (ui.batchProgressLabel) ui.batchProgressLabel.textContent = `Batch Progress: ${value} / ${max}`;
+  } catch (e) {
+    /* ignore */
+  }
+}
+
+function hideBatchProgress() {
+  try {
+    if (ui.batchProgress) ui.batchProgress.hidden = true;
+    if (ui.batchProgressLabel) ui.batchProgressLabel.textContent = `Batch Progress:`;
+  } catch (e) { /* ignore */ }
+}
+
+function updateControlState() {
+  const ready = Boolean(uploadedDecks.A && uploadedDecks.B);
+  ui.startBtn.disabled = !ready;
+  ui.resetBtn.disabled = !ready;
+}
+
+async function handleDeckUpload(slot, file) {
+  if (!file) return;
+
+  const badge = slot === "A" ? ui.deck1Badge : ui.deck2Badge;
+  try {
+    badge.textContent = `${slot === "A" ? "Deck 1" : "Deck 2"}: Loading ${file.name}...`;
+    const text = await file.text();
+    const fileBaseName = file.name.replace(/\.[^/.]+$/, "");
+    const parsedDeck = parseDeckListText(text, fileBaseName || "Uploaded Deck");
+    const simDeck = await buildSimulationDeck(parsedDeck);
+    uploadedDecks[slot] = simDeck;
+
+    updateDeckBadges();
+    updateControlState();
+    if (uploadedDecks.A && uploadedDecks.B) {
+      // Log current requested runs when both decks are uploaded
+      try {
+        const runsVal = ui?.simCountInput?.value || '1';
+        console.log('Both decks uploaded. Runs:', runsVal);
+      } catch (e) { /* ignore */ }
+      resetSimulation(false);
+    } else {
+      renderBoard();
+    }
+  } catch (error) {
+    uploadedDecks[slot] = null;
+    updateDeckBadges();
+    updateControlState();
+    console.error(error);
+    badge.textContent = `${slot === "A" ? "Deck 1" : "Deck 2"}: Upload failed`;
+    ui.metaStats.textContent = `Upload error: ${error?.message || "Could not parse deck file."}`;
+  }
+}
+
+function updateSpeedBadge() {
+  ui.speedBadge.textContent = `Speed: ${simSpeed}ms`;
+}
+
+function updateAudioBadge() {
+  ui.audioBadge.textContent = `Audio: ${audio.getStateLabel()}`;
+}
+
+ui.enableAudioBtn.addEventListener("click", async () => {
+  const ok = await audio.unlockAndTest();
+  updateAudioBadge();
+  if (!ok) {
+    console.warn("Audio could not be unlocked by browser. Sound effects disabled.");
+  }
+});
+
+ui.tableWrap.addEventListener("click", async () => {
+  await audio.ensureContext();
+  updateAudioBadge();
+});
+
+ui.startBtn.addEventListener("click", async () => {
+  console.log('startBtn clicked', { uploadedDecksLoaded: !!uploadedDecks.A && !!uploadedDecks.B, simulatorExists: !!simulator });
+  if (!uploadedDecks.A || !uploadedDecks.B) {
+    console.log('Start pressed but decks not ready');
+    return;
+  }
+  // read requested run count (robust fallback to 1)
+  let runs = 1;
+  try {
+    if (ui.simCountInput) {
+      const raw = ui.simCountInput.value;
+      const num = Number(raw);
+      runs = Number.isFinite(num) && num > 0 ? Math.floor(num) : 1;
+      console.log('Requested runs:', runs, { raw });
+    }
+  } catch (e) {
+    console.warn('Could not read simCountInput, defaulting to 1', e);
+    runs = 1;
+  }
+
+  // If multiple runs requested, play each run visually in sequence
+  if (runs > 1) {
+    // reset win counters
+    winCounters = { A: 0, B: 0 };
+    updateWinBadges();
+
+    // Disable controls while running
+    ui.startBtn.disabled = true;
+    ui.resetBtn.disabled = true;
+    ui.uploadDeck1Btn.disabled = true;
+    ui.uploadDeck2Btn.disabled = true;
+    const silent = Boolean(ui.silentRunCheckbox && ui.silentRunCheckbox.checked);
+
+    if (silent) {
+      // Fast silent batch: run simulations synchronously (but yield to UI between runs)
+      setBatchProgress(0, runs);
+      try {
+        for (let i = 0; i < runs; i += 1) {
+          const runIndex = i + 1;
+          ui.metaStats.textContent = `Running silent run ${runIndex} / ${runs}...`;
+          console.log(`Silent batch run ${runIndex}/${runs} starting`);
+
+          const aRoll = rollD20();
+          const bRoll = rollD20();
+          const starting = aRoll > bRoll ? 0 : 1;
+
+          // Use a no-op logger to avoid heavy DOM updates during silent runs
+          const batchSim = new Simulator(uploadedDecks.A, uploadedDecks.B, () => {}, starting);
+
+          let ticks = 0;
+          while (!batchSim.gameOver) {
+            batchSim.tick();
+            ticks += 1;
+            // periodically yield to the event loop so the UI can update
+            if ((ticks & 0x3FF) === 0) await new Promise((r) => setTimeout(r, 0));
+          }
+
+          if (batchSim.winner?.id === 'A') winCounters.A += 1;
+          else if (batchSim.winner?.id === 'B') winCounters.B += 1;
+          updateWinBadges();
+          setBatchProgress(runIndex, runs);
+          console.log(`Silent batch run ${runIndex} finished after ${ticks} ticks, winner: ${batchSim.winner?.id || 'none'}`);
+          // yield briefly between runs to allow repaint
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((res) => setTimeout(res, 8));
+        }
+      } catch (err) {
+        console.error('Error during silent batch runs:', err);
+      } finally {
+        hideBatchProgress();
+      }
+    } else {
+      // Animated sequential runs (existing behavior)
+      for (let i = 0; i < runs; i += 1) {
+        const runIndex = i + 1;
+        try {
+          ui.metaStats.textContent = `Playing run ${runIndex} / ${runs}...`;
+          console.log(`Animated run ${runIndex}/${runs} starting`);
+
+          // prepare and start a fresh simulator with a per-run roll
+          resetSimulation(true);
+          await audio.ensureContext();
+          updateAudioBadge();
+          simulator.start();
+
+          // wait for simulator to finish
+          await new Promise((resolve) => {
+            const id = setInterval(() => {
+              if (!simulator || simulator.gameOver) {
+                clearInterval(id);
+                resolve();
+              }
+            }, 120);
+          });
+
+          // record winner
+          if (simulator?.winner?.id === 'A') winCounters.A += 1;
+          else if (simulator?.winner?.id === 'B') winCounters.B += 1;
+          updateWinBadges();
+          console.log(`Animated run ${runIndex}/${runs} finished, winner:`, simulator?.winner?.id || 'none');
+
+          // small pause between runs so UI can reflect final state
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((res) => setTimeout(res, 120));
+        } catch (errRun) {
+          console.error(`Error during animated run ${runIndex}:`, errRun);
+        }
+      }
+    }
+
+    // Re-enable controls
+    ui.startBtn.disabled = false;
+    ui.resetBtn.disabled = false;
+    ui.uploadDeck1Btn.disabled = false;
+    ui.uploadDeck2Btn.disabled = false;
+    ui.metaStats.textContent = `Batch complete: ${runs} runs`;
+    renderBoard();
+    return;
+  }
+
+  // Single run behavior
+  if (!simulator) {
+    console.log('No live simulator, creating with resetSimulation');
+    resetSimulation(true);
+  }
+  await audio.ensureContext();
+  updateAudioBadge();
+  console.log('simulator state before start', { exists: !!simulator, gameOver: simulator?.gameOver, hasTimer: !!simulator?.timer });
+  if (simulator && simulator.gameOver) {
+    console.log('Simulator was finished; recreating via resetSimulation');
+    resetSimulation(true);
+  }
+  if (simulator && typeof simulator.start === 'function') {
+    console.log('Starting simulator now');
+    simulator.start();
+  } else {
+    console.warn('Simulator not available to start');
+  }
+});
+
+ui.pauseBtn.addEventListener("click", () => {
+  simulator?.pause();
+});
+
+ui.resetBtn.addEventListener("click", () => {
+  resetSimulation(true);
+});
+
+ui.dismissInfoBannerBtn.addEventListener("click", () => {
+  try {
+    const banner = ui.infoBanner || document.getElementById("infoBanner");
+    if (banner && banner.remove) banner.remove();
+    else if (banner) banner.hidden = true;
+  } catch (e) {
+    console.warn('Could not dismiss info banner', e);
+  }
+});
+
+// Ensure clicking the dismiss button doesn't bubble to other handlers
+if (ui.dismissInfoBannerBtn) {
+  ui.dismissInfoBannerBtn.addEventListener('click', (ev) => ev.stopPropagation());
+}
+
+// Allow Escape key to dismiss banner
+document.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape') {
+    const banner = ui.infoBanner || document.getElementById('infoBanner');
+    if (banner && banner.remove) banner.remove();
+  }
+});
+
+ui.uploadDeck1Btn.addEventListener("click", () => {
+  ui.deck1FileInput.click();
+});
+
+ui.uploadDeck2Btn.addEventListener("click", () => {
+  ui.deck2FileInput.click();
+});
+
+ui.deck1FileInput.addEventListener("change", async (event) => {
+  const file = event.target?.files?.[0];
+  await handleDeckUpload("A", file);
+  event.target.value = "";
+});
+
+ui.deck2FileInput.addEventListener("change", async (event) => {
+  const file = event.target?.files?.[0];
+  await handleDeckUpload("B", file);
+  event.target.value = "";
+});
+
+ui.playersView.addEventListener("dragover", (event) => {
+  const zone = event.target.closest(".deck-upload-zone");
+  if (!zone) return;
+  event.preventDefault();
+  zone.classList.add("drag-over");
+});
+
+ui.playersView.addEventListener("dragleave", (event) => {
+  const zone = event.target.closest(".deck-upload-zone");
+  if (!zone) return;
+  zone.classList.remove("drag-over");
+});
+
+ui.playersView.addEventListener("drop", async (event) => {
+  const zone = event.target.closest(".deck-upload-zone");
+  if (!zone) return;
+  event.preventDefault();
+  zone.classList.remove("drag-over");
+
+  const file = event.dataTransfer?.files?.[0];
+  if (!file) return;
+  const slot = zone.dataset.deckSlot;
+  if (slot !== "A" && slot !== "B") return;
+  await handleDeckUpload(slot, file);
+});
+
+ui.slowerBtn.addEventListener("click", () => {
+  simSpeed = Math.min(3000, simSpeed + 200);
+  updateSpeedBadge();
+  simulator?.setSpeed(simSpeed);
+  renderBoard();
+});
+
+ui.fasterBtn.addEventListener("click", () => {
+  simSpeed = Math.max(200, simSpeed - 200);
+  updateSpeedBadge();
+  simulator?.setSpeed(simSpeed);
+  renderBoard();
+});
+
+audio.setVolume(0.45);
+updateSpeedBadge();
+updateAudioBadge();
+updateDeckBadges();
+updateControlState();
+renderBoard();
+  // Auto-start only when a single run is requested (preserve manual control for batch runs)
+  try {
+    const runsRequested = Number(ui?.simCountInput?.value || 1);
+    if (Number.isFinite(runsRequested) && runsRequested <= 1) {
+      if (simulator && typeof simulator.start === 'function') simulator.start();
+    }
+  } catch (e) {
+    console.warn('Auto-start check failed', e);
+  }

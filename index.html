@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>MTG Commander Simulator</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="info-banner" id="infoBanner" role="note">
+      <span>Export your Commander deck from ManaBox as a Text (.txt) file, then upload Deck 1 and Deck 2 to run the simulation.</span>
+      <button id="dismissInfoBannerBtn" type="button" aria-label="Dismiss info banner">×</button>
+    </div>
+    <main class="table-wrap" id="tableWrap">
+      
+      <div class="table-controls">
+        <div class="control-row row-top">
+          <button id="enableAudioBtn">Enable Audio</button>
+          <button id="startBtn">Start</button>
+          <button id="pauseBtn">Pause</button>
+          <button id="resetBtn">Reset</button>
+          <label class="sim-count-label">Runs: <input id="simCountInput" type="number" min="1" value="1" /></label>
+          <label class="silent-label"><input id="silentRunCheckbox" type="checkbox" /> Silent runs (fast)</label>
+          <button id="slowerBtn">Slower</button>
+          <button id="fasterBtn">Faster</button>
+          <span id="speedBadge">Speed: 1400ms</span>
+          <span id="audioBadge">Audio: Locked</span>
+        </div>
+
+        <div class="control-row row-bottom">
+          <div class="deck-control">
+            <button id="uploadDeck1Btn">Upload Deck 1</button>
+            <input id="deck1FileInput" type="file" accept=".txt" hidden />
+            <span id="deck1Badge">Deck 1: Not loaded</span>
+            <span id="deck1Wins" class="win-badge">Wins: 0</span>
+          </div>
+
+          <div class="deck-control">
+            <button id="uploadDeck2Btn">Upload Deck 2</button>
+            <input id="deck2FileInput" type="file" accept=".txt" hidden />
+            <span id="deck2Badge">Deck 2: Not loaded</span>
+            <span id="deck2Wins" class="win-badge">Wins: 0</span>
+          </div>
+        </div>
+      </div>
+      <div class="batch-progress-wrap" id="batchProgressWrap">
+        <label id="batchProgressLabel">Batch Progress:</label>
+        <progress id="batchProgress" max="100" value="0" hidden></progress>
+      </div>
+      <div class="move-console" id="moveConsole" aria-live="polite">No moves yet.</div>
+      <div class="table-meta" id="metaStats">Loading simulation...</div>
+      <div class="players" id="playersView"></div>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
