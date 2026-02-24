@@ -814,6 +814,16 @@ function renderBoard() {
 
   ui.metaStats.textContent = `Turn ${simulator.turn} • Phase: ${simulator.phase.toUpperCase()} • Active: ${simulator.players[simulator.activePlayerIndex].name} • Speed: ${simSpeed}ms`;
 
+  // Diagnostic: report art/cache and exile/battlefield counts to help debugging
+  try {
+    console.debug(`Art cache: ${cardArtCache.size}, pending: ${pendingCardArt.size}`);
+    simulator.players.forEach((pp) => {
+      const threats = pp.battlefield.filter((c) => c.type === 'threat').length;
+      const lands = pp.battlefield.filter((c) => c.type === 'land').length;
+      console.debug(`Player ${pp.id} ${pp.name}: battlefield threats=${threats}, lands=${lands}, exile=${(pp.exile||[]).length}`);
+    });
+  } catch (e) { /* ignore */ }
+
   const recentMoves = logs.slice(-10).map((entry) => `[T${entry.turn}] ${entry.phase.toUpperCase()}: ${entry.message}`);
   ui.moveConsole.textContent = recentMoves.length ? recentMoves.join("\n") : "No moves yet.";
   ui.moveConsole.scrollTop = ui.moveConsole.scrollHeight;
