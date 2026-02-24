@@ -750,6 +750,7 @@ function renderBoard() {
 
   ui.playersView.innerHTML = simulator.players
     .map((p) => {
+      try {
       const threats = p.battlefield.filter((c) => c.type === "threat").slice(0, 16);
       const lands = p.battlefield.filter((c) => c.type === "land").slice(0, 16);
       const recentGraveyard = (p.graveyard || []).slice(-6).reverse();
@@ -816,6 +817,22 @@ function renderBoard() {
           </div>
         </article>
       `;
+      } catch (err) {
+        console.error('Error rendering player view', err, p);
+        return `
+        <article class="player-card error">
+          <div class="player-header">
+            <strong>Render Error</strong>
+            <span>${escapeHtml(p?.name || 'Unknown')}</span>
+          </div>
+          <div class="mat">
+            <div class="zone-side">
+              <span class="badge">Error rendering player area</span>
+            </div>
+          </div>
+        </article>
+        `;
+      }
     })
     .join("");
 }
