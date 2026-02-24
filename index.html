@@ -16,11 +16,11 @@
     <main class="table-wrap" id="tableWrap">
       
       <div class="table-controls">
-        <div class="control-row row-top">
-          <button id="enableAudioBtn">Enable Audio</button>
-          <button id="startBtn">Start</button>
-          <button id="pauseBtn">Pause</button>
-          <button id="resetBtn">Reset</button>
+          <div class="control-row row-top">
+            <button id="enableAudioBtn" aria-pressed="false" aria-label="Enable audio">Enable Audio</button>
+            <button id="startBtn" aria-label="Start simulation">Start</button>
+            <button id="pauseBtn" aria-label="Pause simulation">Pause</button>
+            <button id="resetBtn" aria-label="Reset simulation">Reset</button>
           <label class="sim-count-label">Runs: <input id="simCountInput" type="number" min="1" value="1" /></label>
           <label class="silent-label"><input id="silentRunCheckbox" type="checkbox" /> Silent runs (fast)</label>
           <button id="slowerBtn">Slower</button>
@@ -31,14 +31,14 @@
 
         <div class="control-row row-bottom">
           <div class="deck-control">
-            <button id="uploadDeck1Btn">Upload Deck 1</button>
+            <button id="uploadDeck1Btn" aria-label="Upload deck one">Upload Deck 1</button>
             <input id="deck1FileInput" type="file" accept=".txt" hidden />
             <span id="deck1Badge">Deck 1: Not loaded</span>
             <span id="deck1Wins" class="win-badge">Wins: 0</span>
           </div>
 
           <div class="deck-control">
-            <button id="uploadDeck2Btn">Upload Deck 2</button>
+            <button id="uploadDeck2Btn" aria-label="Upload deck two">Upload Deck 2</button>
             <input id="deck2FileInput" type="file" accept=".txt" hidden />
             <span id="deck2Badge">Deck 2: Not loaded</span>
             <span id="deck2Wins" class="win-badge">Wins: 0</span>

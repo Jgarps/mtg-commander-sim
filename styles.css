@@ -92,6 +92,14 @@ body {
   justify-content: center;
 }
 
+/* Visible focus outlines for keyboard and assistive tech */
+.table-controls button:focus,
+.deck-control button:focus,
+.card-tile:focus-visible {
+  outline: 3px solid #ffb74d;
+  outline-offset: 3px;
+}
+
 .control-row {
   display: flex;
   gap: 8px;
@@ -351,6 +359,25 @@ body {
 @media (max-width: 950px) {
   .table-wrap {
     height: auto;
+  }
+
+  /* Increase touch target sizes and legibility on small screens */
+  .table-controls button {
+    padding: 10px 12px;
+    font-size: 14px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .deck-control button {
+    padding: 10px 12px;
+    font-size: 14px;
+    height: 44px;
+    min-height: 44px;
+  }
+
+  .card-tile span {
+    font-size: 0.78rem;
   }
 
   .players {
