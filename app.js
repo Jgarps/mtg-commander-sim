@@ -974,6 +974,15 @@ function resetSimulation(performInitialRoll = false) {
     console.warn('Could not print simulator debug info', e);
   }
 
+  // Ensure commander art is fetched right away so the command zone can render images
+  try {
+    simulator.players.forEach((p) => {
+      if (p.commander) fetchCardArt(p.commander);
+    });
+  } catch (e) {
+    /* ignore */
+  }
+
   if (performInitialRoll) {
     d20Rolls.A = rollD20();
     d20Rolls.B = rollD20();
