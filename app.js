@@ -377,6 +377,7 @@ function createPlayer(deckConfig, id) {
     library: shuffle(expandDeck(deckConfig)),
     hand: [],
     battlefield: [],
+    exile: [],
     graveyard: [],
     life: 40,
     manaAvailable: 0,
@@ -793,7 +794,9 @@ function renderBoard() {
               </div>
               <div class="zone zone-exile">
                 <h4>Exile</h4>
-                <span class="badge">Not tracked in MVP</span>
+                <div class="card-grid small">
+                  ${recentExile.length ? recentExile.map((g) => renderCardTile(g, "exile")).join("") : '<span class="badge">Empty</span>'}
+                </div>
               </div>
               <div class="zone zone-library">
                 <h4>Library</h4>
