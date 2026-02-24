@@ -28,32 +28,83 @@ function getCardArt(name) {
   return CARD_BACK_PLACEHOLDER;
 }
 
+// Fetch queue and retry/backoff to avoid hitting Scryfall rate limits from the browser.
+const ART_FETCH_QUEUE = [];
+let ART_FETCH_ACTIVE = 0;
+const ART_FETCH_CONCURRENCY = 4;
+const ART_FETCH_MAX_RETRIES = 4;
+
+function processArtQueue() {
+  while (ART_FETCH_ACTIVE < ART_FETCH_CONCURRENCY && ART_FETCH_QUEUE.length) {
+    const name = ART_FETCH_QUEUE.shift();
+    ART_FETCH_ACTIVE += 1;
+    (async (n) => {
+      try {
+        await _doFetchCardArt(n);
+      } catch (err) {
+        // swallow; _doFetchCardArt will set placeholder on failure
+      } finally {
+        ART_FETCH_ACTIVE -= 1;
+        // schedule next loop tick
+        setTimeout(processArtQueue, 0);
+      }
+    })(name);
+  }
+}
+
 async function fetchCardArt(name) {
-  try {
-    // Use sanitized query name to avoid ManaBox suffixes causing 404s
-    const cleaned = cleanCardName(name);
-    let queryName = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim();
-    queryName = queryName.replace(/\s*\*.*\*$/g, '').trim();
+  const cleaned = cleanCardName(name);
+  if (!cleaned) return;
+  if (cardArtCache.has(cleaned)) return;
+  if (!pendingCardArt.has(cleaned)) {
+    pendingCardArt.add(cleaned);
+    ART_FETCH_QUEUE.push(cleaned);
+    processArtQueue();
+  }
+}
 
-    const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
-    let response = await fetch(byExact);
-    if (!response.ok) {
-      const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
-      response = await fetch(byFuzzy);
+async function _doFetchCardArt(name) {
+  const cleaned = cleanCardName(name);
+  let queryName = cleaned.replace(/\s*\([^)]+\)\s*\d+.*$/i, '').trim();
+  queryName = queryName.replace(/\s*\*.*\*$/g, '').trim();
+
+  for (let attempt = 0; attempt < ART_FETCH_MAX_RETRIES; attempt += 1) {
+    try {
+      const byExact = `https://api.scryfall.com/cards/named?exact=${encodeURIComponent(queryName)}`;
+      let response = await fetch(byExact);
+      if (!response.ok) {
+        const byFuzzy = `https://api.scryfall.com/cards/named?fuzzy=${encodeURIComponent(queryName)}`;
+        response = await fetch(byFuzzy);
+      }
+
+      if (!response.ok) {
+        // If rate limited (429) or other transient, throw to retry
+        if (response.status === 429 || response.status >= 500) throw new Error(`Transient ${response.status}`);
+        throw new Error('No card image found');
+      }
+
+      const card = await response.json();
+      const image = card?.image_uris?.normal || card?.card_faces?.[0]?.image_uris?.normal || CARD_BACK_PLACEHOLDER;
+      cardArtCache.set(cleaned, image);
+      // success — stop retrying
+      pendingCardArt.delete(cleaned);
+      renderBoard();
+      return;
+    } catch (err) {
+      // exponential backoff with jitter
+      const backoff = 400 * Math.pow(2, attempt) + Math.floor(Math.random() * 300);
+      // final attempt: set placeholder and stop
+      if (attempt === ART_FETCH_MAX_RETRIES - 1) {
+        cardArtCache.set(cleaned, CARD_BACK_PLACEHOLDER);
+        pendingCardArt.delete(cleaned);
+        renderBoard();
+        return;
+      }
+      // wait then retry
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, backoff));
+      // continue loop
     }
-    if (!response.ok) throw new Error("No card image found");
-
-    const card = await response.json();
-    const image = card?.image_uris?.normal || card?.card_faces?.[0]?.image_uris?.normal || CARD_BACK_PLACEHOLDER;
-    // cache art keyed by the cleaned display name so UI mapping stays consistent
-    cardArtCache.set(cleaned, image);
-  } catch {
-    const cleaned = cleanCardName(name);
-    cardArtCache.set(cleaned, CARD_BACK_PLACEHOLDER);
-  } finally {
-    const cleaned = cleanCardName(name);
-    pendingCardArt.delete(cleaned);
-    renderBoard();
   }
 }
 
