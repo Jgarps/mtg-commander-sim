@@ -124,7 +124,8 @@ function classifyCardForSimulator(cardData) {
 
   const removalPattern = /destroy|exile|counter target|deals?\s+\d+\s+damage\s+to\s+target|return target.*to (?:its|their) owner'?s hand|target player sacrifices/;
   if (removalPattern.test(oracleText)) {
-    return { type: "removal", cost: cmc, power };
+    const exiles = /exile/.test(oracleText);
+    return { type: "removal", cost: cmc, power, exiles };
   }
 
   if (typeLine.includes("creature") || typeLine.includes("planeswalker")) {
@@ -181,6 +182,7 @@ async function buildSimulationDeck(parsedDeck) {
       type: details?.type || "utility",
       cost: details?.cost ?? 0,
       power: details?.power ?? 0,
+      exiles: details?.exiles ?? false,
     });
   }
 
@@ -605,8 +607,13 @@ class Simulator {
       const target = opponent.battlefield.findIndex((c) => c.type === "threat");
       if (target >= 0) {
         const [killed] = opponent.battlefield.splice(target, 1);
-        opponent.graveyard.push(killed);
-        this.log(player.id, `${player.name} removes opponent ${killed.name}`);
+        if (card.exiles) {
+          opponent.exile.push(killed);
+          this.log(player.id, `${player.name} exiles opponent ${killed.name}`);
+        } else {
+          opponent.graveyard.push(killed);
+          this.log(player.id, `${player.name} removes opponent ${killed.name}`);
+        }
       } else {
         this.log(player.id, `${player.name} has no good removal target`);
       }
