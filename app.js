@@ -220,13 +220,15 @@ async function fetchCardDetails(name) {
   }
 
   const cardData = await _doFetchDetails(queryNameBase);
-
   const classified = classifyCardForSimulator(cardData || {});
+  const image = cardData?.image_uris?.normal || cardData?.card_faces?.[0]?.image_uris?.normal || null;
   const resolved = {
     name: cleaned,
     type: classified.type,
     cost: classified.cost,
     power: classified.power,
+    exiles: classified.exiles || false,
+    image,
   };
 
   cardMetaCache.set(cleaned, resolved);
@@ -246,6 +248,11 @@ async function buildSimulationDeck(parsedDeck) {
       power: details?.power ?? 0,
       exiles: details?.exiles ?? false,
     });
+    // If we discovered an image during details fetch, seed the art cache to avoid extra client requests
+    try {
+      const cleaned = cleanCardName(entry.name);
+      if (details?.image) cardArtCache.set(cleaned, details.image);
+    } catch (e) { /* ignore */ }
   }
 
   return {
