@@ -246,6 +246,7 @@ async function buildSimulationDeck(parsedDeck) {
       type: details?.type || "utility",
       cost: details?.cost ?? 0,
       power: details?.power ?? 0,
+      toughness: details?.toughness ?? (details?.power ?? 0),
       exiles: details?.exiles ?? false,
     });
     // If we discovered an image during details fetch, seed the art cache to avoid extra client requests
@@ -262,6 +263,14 @@ async function buildSimulationDeck(parsedDeck) {
       const cmdDetails = await fetchCardDetails(cmdName);
       const cleanedCmd = cleanCardName(cmdName);
       if (cmdDetails?.image) cardArtCache.set(cleanedCmd, cmdDetails.image);
+      // attach commander details to returned deck for simulator to use
+      parsedDeck.commanderDetails = {
+        name: cleanedCmd,
+        type: cmdDetails?.type || 'threat',
+        cost: cmdDetails?.cost ?? 0,
+        power: cmdDetails?.power ?? 0,
+        image: cmdDetails?.image || null,
+      };
     }
   } catch (e) {
     /* ignore commander fetch errors */
@@ -270,6 +279,7 @@ async function buildSimulationDeck(parsedDeck) {
   return {
     name: parsedDeck.name,
     commander: parsedDeck.commander,
+    commanderDetails: parsedDeck.commanderDetails || null,
     cards,
   };
 }
@@ -425,13 +435,15 @@ function expandDeck(deckConfig) {
 
 function randomIndex(maxExclusive) {
   if (maxExclusive <= 1) return 0;
-  if (window.crypto?.getRandomValues) {
+  // Prefer a secure RNG when available (browser or Node's globalThis.crypto)
+  const cryptoObj = (typeof window !== 'undefined' ? window.crypto : (typeof globalThis !== 'undefined' ? globalThis.crypto : null));
+  if (cryptoObj?.getRandomValues) {
     const range = 0x100000000;
     const threshold = range - (range % maxExclusive);
     const buffer = new Uint32Array(1);
     let value = 0;
     do {
-      window.crypto.getRandomValues(buffer);
+      cryptoObj.getRandomValues(buffer);
       value = buffer[0];
     } while (value >= threshold);
     return value % maxExclusive;
@@ -457,6 +469,12 @@ function createPlayer(deckConfig, id) {
     id,
     name: deckConfig.name,
     commander: deckConfig.commander,
+    commanderDetails: deckConfig.commanderDetails || null,
+    // Commander starts in the command zone; track times cast from command zone
+    commanderTimesCasted: 0,
+    commandZone: deckConfig.commander ? { name: deckConfig.commander } : null,
+    // Track commander damage received from each opponent: { [opponentId]: damage }
+    commanderDamageReceived: {},
     library: shuffle(expandDeck(deckConfig)),
     hand: [],
     battlefield: [],
@@ -477,6 +495,7 @@ class Simulator {
     this.timer = null;
     this.turn = 1;
     this.activePlayerIndex = startingPlayerIndex;
+    this.startingPlayerIndex = startingPlayerIndex;
     this.phase = "setup";
     this.players = [createPlayer(deckA, "A"), createPlayer(deckB, "B")];
     this.gameOver = false;
@@ -522,7 +541,12 @@ class Simulator {
     this.untap(active);
 
     this.phase = "draw";
-    this.draw(active, true);
+    // Skip first-turn draw for the player who goes first (Commander rule)
+    if (!(this.turn === 1 && this.activePlayerIndex === this.startingPlayerIndex)) {
+      this.draw(active, true);
+    } else {
+      this.log(active.id, `${active.name} skips their first-turn draw`);
+    }
 
     this.phase = "main";
     this.mainPhase(active, opponent);
@@ -547,6 +571,12 @@ class Simulator {
   untap(player) {
     player.manaAvailable = player.landsInPlay;
     player.landsPlayedThisTurn = 0;
+    // Creatures that were under the player's control at the start of this turn lose summoning sickness
+    try {
+      (player.battlefield || []).forEach((c) => {
+        if (c && c.summoningSick) c.summoningSick = false;
+      });
+    } catch (e) { /* ignore */ }
     this.log(player.id, `${player.name} untaps and has ${player.manaAvailable} mana from lands`);
   }
 
@@ -612,8 +642,14 @@ class Simulator {
         }
       }
       const [discarded] = player.hand.splice(worstIdx, 1);
-      player.graveyard.push(discarded);
-      this.log(player.id, `${player.name} discards ${discarded.name} to maintain a ${MAX_HAND}-card hand`, 'discard');
+      // If the discarded card is the player's commander, return it to the command zone instead
+      if (discarded && (discarded.isCommander || discarded.name === player.commander)) {
+        player.commandZone = { name: player.commander };
+        this.log(player.id, `${player.name} discards their commander ${discarded.name}; it returns to the command zone`, 'command');
+      } else {
+        player.graveyard.push(discarded);
+        this.log(player.id, `${player.name} discards ${discarded.name} to maintain a ${MAX_HAND}-card hand`, 'discard');
+      }
     }
   }
 
@@ -636,6 +672,22 @@ class Simulator {
 
     // Find playable spells (non-lands) within available mana
     const playable = player.hand.filter((c) => c.type !== "land" && (c.cost || 0) <= player.manaAvailable);
+    // Allow casting commander from the command zone (with commander tax)
+    if (player.commandZone && player.commandZone.name && player.commanderDetails) {
+      const baseCost = Number(player.commanderDetails.cost || 0);
+      const tax = 2 * (player.commanderTimesCasted || 0);
+      const cmdCost = Math.max(0, baseCost + tax);
+      if (cmdCost <= player.manaAvailable) {
+        // Add a synthetic playable commander card (source: command)
+        playable.push({
+          name: player.commandZone.name,
+          type: 'threat',
+          cost: cmdCost,
+          power: player.commanderDetails.power || 0,
+          source: 'command',
+        });
+      }
+    }
     if (playable.length === 0) {
       this.log(player.id, `${player.name} takes no main actions`);
       return;
@@ -650,6 +702,20 @@ class Simulator {
     });
 
     const chosen = playable[0];
+    // If chosen is being cast from the command zone, it's not in hand — handle separately
+    if (chosen.source === 'command') {
+      const card = {
+        name: chosen.name,
+        type: chosen.type,
+        cost: chosen.cost,
+        power: chosen.power,
+        source: 'command',
+      };
+      player.manaAvailable = Math.max(0, player.manaAvailable - (card.cost || 0));
+      this.resolveSpell(card, player, opponent);
+      return;
+    }
+
     const idx = player.hand.findIndex((c) => c.name === chosen.name && c.type === chosen.type && (c.cost || 0) === (chosen.cost || 0));
     if (idx === -1) {
       this.log(player.id, `${player.name} couldn't locate chosen card in hand`);
@@ -688,7 +754,12 @@ class Simulator {
       const target = opponent.battlefield.findIndex((c) => c.type === "threat");
       if (target >= 0) {
         const [killed] = opponent.battlefield.splice(target, 1);
-        if (card.exiles) {
+        // Commander replacement: if the killed card is the opponent's commander, it returns to the command zone
+        if (killed && killed.name === opponent.commander) {
+          // preserve commanderTimesCasted on the player object and return commander to command zone
+          opponent.commandZone = { name: opponent.commander };
+          this.log(player.id, `${player.name} removes opponent commander ${killed.name}; it returns to the command zone`);
+        } else if (card.exiles) {
           opponent.exile.push(killed);
           this.log(player.id, `${player.name} exiles opponent ${killed.name}`);
         } else {
@@ -703,6 +774,18 @@ class Simulator {
     }
 
     if (card.type === "threat") {
+      // If casting from the command zone, mark commander state and increment tax counter
+      if (card.source === 'command') {
+        player.commanderTimesCasted = (player.commanderTimesCasted || 0) + 1;
+        // remove from command zone
+        player.commandZone = null;
+      }
+      // Mark commander instances for later tracking
+      if (player.commander && card.name === player.commander) card.isCommander = true;
+      // Give creature summoning sickness when it enters battlefield (unless it has 'haste')
+      card.summoningSick = true;
+      // ensure toughness exists
+      card.toughness = card.toughness ?? card.power ?? 0;
       player.battlefield.push(card);
       this.log(player.id, `${player.name} deploys threat (power ${card.power || 0})`);
       return;
@@ -712,14 +795,83 @@ class Simulator {
   }
 
   combat(player, opponent) {
-    const attackers = player.battlefield.filter((c) => c.type === "threat");
-    const damage = attackers.reduce((sum, c) => sum + (c.power || 0), 0);
-    if (damage > 0) {
-      opponent.life -= damage;
-      player.damageThisCombat = damage;
-      this.log(player.id, `${player.name} attacks for ${damage}. ${opponent.name} to ${opponent.life}`);
-    } else {
+    // Determine eligible attackers (no summoning sickness)
+    const attackers = player.battlefield.filter((c) => c.type === "threat" && !c.summoningSick);
+    if (!attackers.length) {
       this.log(player.id, `${player.name} has no attacks`);
+      return;
+    }
+
+    // Potential blockers (can block even if summoning-sick)
+    const blockers = [...opponent.battlefield.filter((c) => c.type === 'threat')];
+
+    // Simple blocking AI: pair largest blockers to largest attackers 1:1
+    const sortedAttackers = attackers.slice().sort((a, b) => (b.power || 0) - (a.power || 0));
+    const sortedBlockers = blockers.slice().sort((a, b) => (b.power || 0) - (a.power || 0));
+
+    const pairs = [];
+    const remainingAttackers = [];
+
+    for (let i = 0; i < sortedAttackers.length; i += 1) {
+      const at = sortedAttackers[i];
+      const blk = sortedBlockers.shift();
+      if (blk) pairs.push({ attacker: at, blocker: blk });
+      else remainingAttackers.push(at);
+    }
+
+    let totalDamageToPlayer = 0;
+
+    // Resolve blocked fights
+    for (const p of pairs) {
+      const a = p.attacker;
+      const b = p.blocker;
+      const aDamage = a.power || 0;
+      const bDamage = b.power || 0;
+
+      // deal damage to each other
+      // If blocker dies, send to graveyard (or command zone if commander)
+      if (bDamage >= (a.toughness || a.power || 0)) {
+        // attacker dies
+        const idx = player.battlefield.indexOf(a);
+        if (idx >= 0) player.battlefield.splice(idx, 1);
+        if (a.isCommander) {
+          player.commandZone = { name: player.commander };
+          this.log(player.id, `${a.name} (commander) dies and returns to command zone`);
+        } else {
+          player.graveyard.push(a);
+          this.log(player.id, `${a.name} dies in combat and goes to graveyard`);
+        }
+      }
+
+      if (aDamage >= (b.toughness || b.power || 0)) {
+        const idx = opponent.battlefield.indexOf(b);
+        if (idx >= 0) opponent.battlefield.splice(idx, 1);
+        if (b.isCommander) {
+          opponent.commandZone = { name: opponent.commander };
+          this.log(player.id, `${player.name} kills ${b.name} (commander); it returns to command zone`);
+        } else {
+          opponent.graveyard.push(b);
+          this.log(player.id, `${player.name}'s ${a.name} kills blocker ${b.name}`);
+        }
+      }
+    }
+
+    // Unblocked attackers deal damage to player (and to commander damage tracking if attacker is a commander)
+    for (const ua of remainingAttackers) {
+      const dmg = ua.power || 0;
+      totalDamageToPlayer += dmg;
+      if (ua.isCommander) {
+        opponent.commanderDamageReceived[player.id] = (opponent.commanderDamageReceived[player.id] || 0) + dmg;
+        this.log(player.id, `${player.name}'s commander deals ${dmg} commander damage to ${opponent.name} (total ${opponent.commanderDamageReceived[player.id]})`);
+      }
+    }
+
+    if (totalDamageToPlayer > 0) {
+      opponent.life -= totalDamageToPlayer;
+      player.damageThisCombat = totalDamageToPlayer;
+      this.log(player.id, `${player.name} attacks for ${totalDamageToPlayer}. ${opponent.name} to ${opponent.life}`);
+    } else {
+      this.log(player.id, `${player.name} deals no unblocked damage`);
     }
   }
 
@@ -728,9 +880,17 @@ class Simulator {
   }
 
   checkWinner() {
-    const dead = this.players.filter((p) => p.life <= 0);
-    if (dead.length === 0) return false;
-    this.winner = this.players.find((p) => p.life > 0) || this.players[0];
+    // A player loses if life <= 0 OR if they've taken 21+ commander damage from a single commander
+    const losers = this.players.filter((p) => {
+      if (p.life <= 0) return true;
+      const byCommander = Object.values(p.commanderDamageReceived || {}).some((v) => (v || 0) >= 21);
+      return byCommander;
+    });
+    if (losers.length === 0) return false;
+    // If only one player remains, they win. If both lose at same time, pick first alive or null.
+    const alive = this.players.filter((p) => !losers.includes(p));
+    if (alive.length === 1) this.winner = alive[0];
+    else this.winner = this.players.find((p) => p.life > 0) || this.players[0];
     return true;
   }
 
@@ -748,34 +908,40 @@ class Simulator {
   }
 }
 
-const ui = {
-  infoBanner: document.getElementById("infoBanner"),
-  dismissInfoBannerBtn: document.getElementById("dismissInfoBannerBtn"),
-  tableWrap: document.getElementById("tableWrap"),
-  startBtn: document.getElementById("startBtn"),
-  pauseBtn: document.getElementById("pauseBtn"),
-  resetBtn: document.getElementById("resetBtn"),
-  uploadDeck1Btn: document.getElementById("uploadDeck1Btn"),
-  uploadDeck2Btn: document.getElementById("uploadDeck2Btn"),
-  deck1FileInput: document.getElementById("deck1FileInput"),
-  deck2FileInput: document.getElementById("deck2FileInput"),
-  deck1Badge: document.getElementById("deck1Badge"),
-  deck2Badge: document.getElementById("deck2Badge"),
-  slowerBtn: document.getElementById("slowerBtn"),
-  fasterBtn: document.getElementById("fasterBtn"),
-  enableAudioBtn: document.getElementById("enableAudioBtn"),
-  speedBadge: document.getElementById("speedBadge"),
-  audioBadge: document.getElementById("audioBadge"),
-  moveConsole: document.getElementById("moveConsole"),
-  playersView: document.getElementById("playersView"),
-  metaStats: document.getElementById("metaStats"),
-  simCountInput: document.getElementById("simCountInput"),
-  deck1Wins: document.getElementById("deck1Wins"),
-  deck2Wins: document.getElementById("deck2Wins"),
-  silentRunCheckbox: document.getElementById("silentRunCheckbox"),
-  batchProgress: document.getElementById("batchProgress"),
-  batchProgressLabel: document.getElementById("batchProgressLabel"),
-};
+let ui = null;
+if (typeof document !== 'undefined') {
+  ui = {
+    infoBanner: document.getElementById("infoBanner"),
+    dismissInfoBannerBtn: document.getElementById("dismissInfoBannerBtn"),
+    tableWrap: document.getElementById("tableWrap"),
+    startBtn: document.getElementById("startBtn"),
+    pauseBtn: document.getElementById("pauseBtn"),
+    resetBtn: document.getElementById("resetBtn"),
+    uploadDeck1Btn: document.getElementById("uploadDeck1Btn"),
+    uploadDeck2Btn: document.getElementById("uploadDeck2Btn"),
+    deck1FileInput: document.getElementById("deck1FileInput"),
+    deck2FileInput: document.getElementById("deck2FileInput"),
+    deck1Badge: document.getElementById("deck1Badge"),
+    deck2Badge: document.getElementById("deck2Badge"),
+    slowerBtn: document.getElementById("slowerBtn"),
+    fasterBtn: document.getElementById("fasterBtn"),
+    enableAudioBtn: document.getElementById("enableAudioBtn"),
+    speedBadge: document.getElementById("speedBadge"),
+    audioBadge: document.getElementById("audioBadge"),
+    moveConsole: document.getElementById("moveConsole"),
+    playersView: document.getElementById("playersView"),
+    metaStats: document.getElementById("metaStats"),
+    simCountInput: document.getElementById("simCountInput"),
+    deck1Wins: document.getElementById("deck1Wins"),
+    deck2Wins: document.getElementById("deck2Wins"),
+    silentRunCheckbox: document.getElementById("silentRunCheckbox"),
+    batchProgress: document.getElementById("batchProgress"),
+    batchProgressLabel: document.getElementById("batchProgressLabel"),
+  };
+} else {
+  // headless stub for Node tests
+  ui = {};
+}
 
 let logs = [];
 let simulator = null;
@@ -900,10 +1066,11 @@ function renderBoard() {
                 <h4>Life</h4>
                 <div class="life-box">${p.life}</div>
               </div>
-              <div class="zone zone-command">
-                <h4>Command Zone</h4>
-                <div class="card-grid small">${renderCardTile({ name: p.commander }, "command")}</div>
-              </div>
+                      <div class="zone zone-command">
+                        <h4>Command Zone</h4>
+                        <div class="card-grid small">${p.commandZone && p.commandZone.name ? renderCardTile({ name: p.commandZone.name }, "command") : '<span class="badge">Commander on battlefield</span>'}</div>
+                        ${p.commandZone && p.commandZone.name ? `<span class="badge">Tax: +${2 * (p.commanderTimesCasted || 0)}</span>` : ''}
+                      </div>
               <div class="zone zone-exile">
                 <h4>Exile</h4>
                 <div class="card-grid small">
@@ -1091,20 +1258,21 @@ function updateAudioBadge() {
   ui.audioBadge.textContent = `Audio: ${audio.getStateLabel()}`;
 }
 
-ui.enableAudioBtn.addEventListener("click", async () => {
-  const ok = await audio.unlockAndTest();
-  updateAudioBadge();
-  if (!ok) {
-    console.warn("Audio could not be unlocked by browser. Sound effects disabled.");
-  }
-});
+if (typeof document !== 'undefined' && ui) {
+  ui.enableAudioBtn.addEventListener("click", async () => {
+    const ok = await audio.unlockAndTest();
+    updateAudioBadge();
+    if (!ok) {
+      console.warn("Audio could not be unlocked by browser. Sound effects disabled.");
+    }
+  });
 
-ui.tableWrap.addEventListener("click", async () => {
-  await audio.ensureContext();
-  updateAudioBadge();
-});
+  ui.tableWrap.addEventListener("click", async () => {
+    await audio.ensureContext();
+    updateAudioBadge();
+  });
 
-ui.startBtn.addEventListener("click", async () => {
+  ui.startBtn.addEventListener("click", async () => {
   console.log('startBtn clicked', { uploadedDecksLoaded: !!uploadedDecks.A && !!uploadedDecks.B, simulatorExists: !!simulator });
   if (!uploadedDecks.A || !uploadedDecks.B) {
     console.log('Start pressed but decks not ready');
@@ -1336,12 +1504,15 @@ ui.fasterBtn.addEventListener("click", () => {
   renderBoard();
 });
 
-audio.setVolume(0.45);
-updateSpeedBadge();
-updateAudioBadge();
-updateDeckBadges();
-updateControlState();
-renderBoard();
+} // end DOM listeners guard
+
+if (typeof document !== 'undefined') {
+  audio.setVolume(0.45);
+  updateSpeedBadge();
+  updateAudioBadge();
+  updateDeckBadges();
+  updateControlState();
+  renderBoard();
   // Auto-start only when a single run is requested (preserve manual control for batch runs)
   try {
     const runsRequested = Number(ui?.simCountInput?.value || 1);
@@ -1351,3 +1522,13 @@ renderBoard();
   } catch (e) {
     console.warn('Auto-start check failed', e);
   }
+}
+
+// Export core simulator symbols for headless testing (Node)
+try {
+  if (typeof module !== 'undefined' && module.exports) {
+    module.exports = { Simulator, createPlayer, expandDeck, shuffle, rollD20 };
+  }
+} catch (e) {
+  // ignore
+}
