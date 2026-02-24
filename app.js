@@ -849,6 +849,15 @@ function renderBoard() {
       const renderCardTile = (card, zone) => {
         const art = getCardArt(card.name);
         const cardName = escapeHtml(card.name);
+        // Debug: if art is placeholder, log cache/meta state to help diagnose
+        try {
+          const cleaned = cleanCardName(card.name);
+          if (art === CARD_BACK_PLACEHOLDER) {
+            console.debug('No art for', cleaned, { cacheHas: cardArtCache.has(cleaned), pending: pendingCardArt.has(cleaned), meta: cardMetaCache.get(cleaned) });
+          }
+        } catch (e) {
+          /* ignore */
+        }
         return `<div class="card-tile" title="${cardName} [${zone}]">
           <img src="${art}" alt="${cardName}" loading="lazy" />
           <span>${cardName}</span>
