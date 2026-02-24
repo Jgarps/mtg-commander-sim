@@ -1,18 +1,15 @@
 # MTG Commander Simulator (Two-Deck Framework)
 
-This is a web prototype for simulating two Commander-style decks playing each other with:
+This is a web prototype for simulating two Commander-style decks playing each other.
 
-- Visual playmat-style battlefield state for both players
-# MTG Commander Simulator (Two-Deck Framework)
+Core features:
+- Visual playmat-style battlefield for both players
+- Auto-running simulation playback and a move console log
+- Basic gameplay rules for Commander (two-player simplified)
+- Commander-specific rules: command zone, commander tax, commander damage tracking
+- Sound effects and Scryfall-based card art rendering
 
-This is a web prototype for simulating two Commander-style decks playing each other with:
-
-- Visual playmat-style battlefield state for both players
-- Auto-running simulation playback
-- Logging output in browser developer console
-- Gameplay sound effects and card art rendering
-
-The app expects you to upload both deck files before simulation starts.
+The UI expects you to upload both deck files before running a simulation.
 
 ## Run
 
@@ -36,6 +33,22 @@ Then open http://localhost:8000 in your browser.
 4. Click **Enable Audio** (or click the play area) to unlock sound effects (browser autoplay policy).
 5. Open DevTools → Console to view detailed logs.
 
+Headless (Node) test runner
+- The project contains headless smoke tests and targeted tests that run under Node.js.
+- Requirements: Node 16+ (LTS recommended).
+- Run the smoke harness (10 sample silent runs):
+
+```powershell
+node test/smoke.js
+```
+
+- Run targeted tests (examples):
+
+```powershell
+node test/commander_tax_test.js
+node test/exile_test.js
+```
+
 ## Audio controls
 
 - Use **Enable Audio** to unlock sound effects in your browser (required by autoplay policy).
@@ -45,6 +58,10 @@ Then open http://localhost:8000 in your browser.
 
 - The battlefield and graveyard panels render card thumbnails while the game runs.
 - Art is fetched from Scryfall by card name and cached in-browser. If a lookup fails, a default card-back image is used.
+
+UI notes
+- Exile events are logged to the move console (`exile` class) so you can quickly spot exiled cards during simulations.
+- The Command Zone area shows a `Tax: +N` badge when the commander is in the command zone (N = 2 × times cast).
 
 ## Deck upload format (`.txt`)
 
@@ -62,6 +79,35 @@ Use this structure (same style as exported ManaBox files):
 - The first `// COMMANDER` card is used as the commander.
 - All other quantity lines are treated as the deck cards.
 - Card roles (`land`, `ramp`, `draw`, `removal`, `threat`, `utility`) are inferred from Scryfall data during upload.
+
+Example deck files
+------------------
+You can find two example deck files in the repository under the `decks/` folder: `decks/example_deck_A.txt` and `decks/example_deck_B.txt`.
+
+An example `.txt` deck structure (minimal):
+
+```txt
+// COMMANDER
+1 Atraxa, Praetors' Voice (M21) 001
+
+1 Sol Ring (M11) 001
+36 Plains (CORE) 250
+4 Small Threat (CUSTOM) 001
+4 Big Threat (CUSTOM) 002
+```
+
+These sample decks are intentionally small and illustrative. You can upload your own deck files following the same structure or use the provided samples for quick testing.
+
+Gameplay rules (simplified)
+- Commander: commander starts in the command zone. Casting from the command zone costs base CMC + 2 × times previously cast from command zone.
+- Commander damage: receiving 21 or more combat damage from a single commander causes that player to lose.
+- First-turn draw: the player who goes first skips their first-turn draw (Commander rule).
+- Summoning sickness: creatures enter with summoning sickness and cannot attack the turn they enter (no haste implemented). Creatures are cleared of summoning sickness on their controller's next untap.
+- Combat: a simple blocking AI pairs largest blockers to largest attackers (1:1). Blocked creatures exchange damage and die if their toughness is met or exceeded. Unblocked attackers deal damage to the defending player.
+
+Notes and limitations
+- This simulator is intentionally simplified: it does not implement the full stack, priority passes, complex replacement effects, multiple blockers per attacker, first strike, trample, deathtouch, or accurate continuous damage tracking across multiple turns.
+- Card-level interactions (keywords, triggered abilities) are not fully modeled; classification is heuristic based on Scryfall oracle text.
 
 ## Internal deck JSON format
 

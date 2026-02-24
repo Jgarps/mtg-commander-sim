@@ -1,0 +1,9 @@
+// COMMANDER
+1 Kraum, Ludevic's Opus (KLD) 001
+
+// Main deck
+36 Island (CORE) 250
+1 Sol Ring (M11) 001
+8 Small Threat (CUSTOM) 003
+8 Big Threat (CUSTOM) 004
+4 Ramp (CUSTOM) 011

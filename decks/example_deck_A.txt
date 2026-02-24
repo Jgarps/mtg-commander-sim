@@ -1,0 +1,9 @@
+// COMMANDER
+1 Atraxa, Praetors' Voice (M21) 001
+
+// Main deck
+36 Plains (CORE) 250
+1 Sol Ring (M11) 001
+8 Small Threat (CUSTOM) 001
+8 Big Threat (CUSTOM) 002
+4 Ramp (CUSTOM) 010
