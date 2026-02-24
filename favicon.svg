@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48">
+  <rect width="48" height="48" rx="8" fill="#10182f"/>
+  <rect x="4" y="4" width="40" height="40" rx="6" fill="#1a2447" stroke="#384d86" stroke-width="2"/>
+  <text x="24" y="30" font-family="Segoe UI, Arial" font-size="18" fill="#d9e2ff" text-anchor="middle">MTG</text>
+</svg>
