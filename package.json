@@ -1,0 +1,10 @@
+{
+  "name": "mtg-commander-sim",
+  "version": "0.1.0",
+  "description": "A simplified MTG Commander simulator for two decks with headless tests",
+  "main": "app.js",
+  "scripts": {
+    "test": "node test/run_all.js"
+  },
+  "license": "MIT"
+}
