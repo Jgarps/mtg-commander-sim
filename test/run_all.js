@@ -4,6 +4,9 @@ const path = require('path');
 const tests = [
   'test/commander_tax_test.js',
   'test/exile_test.js',
+  'test/mulligan_test.js',
+  'test/commander_recast_test.js',
+  'test/multi_block_test.js',
   'test/smoke.js',
 ];
 

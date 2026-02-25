@@ -593,6 +593,39 @@ class Simulator {
     this.enforceHandLimit(player);
   }
 
+  // Simple implementation of the London mulligan: shuffle entire hand into library,
+  // draw 7, then put `mulligans` cards from hand to bottom of library.
+  mulligan(player, mulligans = 0) {
+    try {
+      // return hand to library and shuffle
+      player.library.push(...player.hand.splice(0));
+      player.library = shuffle(player.library);
+      // draw 7
+      player.hand = [];
+      for (let i = 0; i < 7; i += 1) {
+        if (player.library.length === 0) break;
+        player.hand.push(player.library.pop());
+      }
+      // put mulligan number of cards from hand to bottom (choose lowest value)
+      for (let m = 0; m < mulligans; m += 1) {
+        if (player.hand.length === 0) break;
+        // pick worst card by evaluateCardValue
+        let worstIdx = 0;
+        let worstVal = Infinity;
+        for (let i = 0; i < player.hand.length; i += 1) {
+          const v = this.evaluateCardValue(player, player.hand[i]);
+          if (v < worstVal) { worstVal = v; worstIdx = i; }
+        }
+        const [putBack] = player.hand.splice(worstIdx, 1);
+        player.library.unshift(putBack); // bottom of library (front of array)
+        this.log(player.id, `${player.name} mulligans and puts ${putBack.name} on bottom`);
+      }
+      this.log(player.id, `${player.name} completes mulligan: hand ${player.hand.length}`);
+    } catch (e) {
+      console.warn('Mulligan failed', e);
+    }
+  }
+
   // Evaluate a card's value in the current player state. Higher = more valuable.
   evaluateCardValue(player, card) {
     if (!card) return -Infinity;
